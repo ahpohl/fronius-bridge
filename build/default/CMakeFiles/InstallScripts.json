@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/alex/eclipse-workspace/fronius-ng/build/default/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -1,0 +1,32 @@
+modbus:
+  tcp:
+    host: localhost
+    port: 502
+  rtu:
+    device: /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AC009Y6C-if00-port0
+    baud: 9600
+  slave_id: 1
+  update_interval: 1
+  reconnect_delay:
+    min: 5
+    max: 320
+    exponential: false
+      
+mqtt:
+  broker: localhost
+  port: 1883
+  topic: fronius-ng/live
+  #user: mqtt
+  #password: M{jMl{C/4y^6kQJlX+87
+  queue_size: 100
+  reconnect_delay:
+    min: 2
+    max: 64
+    exponential: true
+  
+logger:
+  level: info               # global default: off | error | warn | info | debug | trace
+  modules:
+    main: info
+    modbus: trace
+    mqtt: info
