@@ -2,7 +2,7 @@
 #define MODBUS_MASTER_H_
 
 #include "config_yaml.h"
-#include "meter.h"
+#include "inverter.h"
 #include "signal_handler.h"
 #include <atomic>
 #include <condition_variable>
@@ -21,16 +21,33 @@ public:
                         SignalHandler &signalHandler);
   virtual ~ModbusMaster();
 
+  struct MpptTracker {
+    double voltage{0.0};
+    double current{0.0};
+    double energy{0.0};
+  };
+
+  struct AcPhase {
+    double voltage{0.0};
+    double current{0.0};
+  };
+
   struct Values {
     uint64_t time{0};
-    double energy{0.0};
-    double powerTotal{0.0};
-    double powerPhase1{0.0};
-    double powerPhase2{0.0};
-    double powerPhase3{0.0};
-    double voltagePhase1{0.0};
-    double voltagePhase2{0.0};
-    double voltagePhase3{0.0};
+    double acEnergy{0.0};
+    AcPhase acPhase1;
+    AcPhase acPhase2;
+    AcPhase acPhase3;
+    double acPowerActive{0.0};
+    double acPowerReactive{0.0};
+    double acPowerApparent{0.0};
+    double acPowerFactor{0.0};
+    double acFrequency{0.0};
+    double acEfficiency{0.0};
+    MpptTracker dcString1;
+    MpptTracker dcString2;
+    double dcPower{0.0};
+    double feedInTariff{0.0};
   };
 
   std::string getJsonDump(void) const;
@@ -44,10 +61,10 @@ public:
 
 private:
   void runLoop();
-  Meter makeMeterFromConfig(const ModbusRootConfig &cfg);
+  Inverter makeModbusConfig(const ModbusRootConfig &cfg);
 
   const ModbusRootConfig &cfg_;
-  Meter meter_;
+  Inverter inverter_;
   Values values_;
   nlohmann::json json_;
   std::shared_ptr<spdlog::logger> modbusLogger_;

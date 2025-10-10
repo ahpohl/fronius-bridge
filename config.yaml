@@ -11,11 +11,12 @@ modbus:
     min: 5
     max: 320
     exponential: false
+  feed_in_tariff: 0.3914
       
 mqtt:
   broker: localhost
   port: 1883
-  topic: fronius-ng/live
+  topic: modbus-master/live
   #user: mqtt
   #password: M{jMl{C/4y^6kQJlX+87
   queue_size: 100

@@ -1,7 +1,8 @@
 #include "modbus_master.h"
 #include "config_yaml.h"
+#include "inverter.h"
 #include "json_utils.h"
-#include "meter.h"
+#include "math_utils.h"
 #include "modbus_config.h"
 #include <chrono>
 #include <expected>
@@ -10,32 +11,32 @@
 
 ModbusMaster::ModbusMaster(const ModbusRootConfig &cfg,
                            SignalHandler &signalHandler)
-    : cfg_(cfg), meter_(makeMeterFromConfig(cfg)), handler_(signalHandler) {
+    : cfg_(cfg), inverter_(makeModbusConfig(cfg)), handler_(signalHandler) {
 
   modbusLogger_ = spdlog::get("modbus");
   if (!modbusLogger_)
     modbusLogger_ = spdlog::default_logger();
 
-  // Meter callbacks
-  meter_.setConnectCallback([this]() {
-    modbusLogger_->info("Meter connected successfully");
+  // Inverter callbacks
+  inverter_.setConnectCallback([this]() {
+    modbusLogger_->info("Inverter connected successfully");
 
-    auto valid = meter_.validateDevice();
+    auto valid = inverter_.validateDevice();
     if (!valid) {
       connectedAndValid_.store(false);
     } else {
       connectedAndValid_.store(true);
-      modbusLogger_->info("The energy meter is SunSpec v1.0 compatible");
+      modbusLogger_->info("The inverter is SunSpec v1.0 compatible");
       auto info = printModbusInfo();
     }
   });
 
-  meter_.setDisconnectCallback([this]() {
-    modbusLogger_->warn("Meter disconnected");
+  inverter_.setDisconnectCallback([this]() {
+    modbusLogger_->warn("Inverter disconnected");
     connectedAndValid_ = false;
   });
 
-  meter_.setErrorCallback([this](const ModbusError &err) {
+  inverter_.setErrorCallback([this](const ModbusError &err) {
     if (err.severity == ModbusError::Severity::FATAL) {
       modbusLogger_->error("FATAL Modbus error: {} (code {})", err.message,
                            err.code);
@@ -52,7 +53,7 @@ ModbusMaster::ModbusMaster(const ModbusRootConfig &cfg,
     }
   });
 
-  // Connect meter
+  // Connect inverter
   auto conn = connect();
   if (!conn) {
     throw std::runtime_error(conn.error().message);
@@ -113,7 +114,7 @@ ModbusMaster::Values ModbusMaster::getValues() const {
   return values_;
 }
 
-Meter ModbusMaster::makeMeterFromConfig(const ModbusRootConfig &cfg) {
+Inverter ModbusMaster::makeModbusConfig(const ModbusRootConfig &cfg) {
   ModbusConfig mcfg;
 
   if (cfg.tcp) {
@@ -137,57 +138,57 @@ Meter ModbusMaster::makeMeterFromConfig(const ModbusRootConfig &cfg) {
   mcfg.reconnectDelayMax = cfg.reconnectDelay->max;
   mcfg.exponential = cfg.reconnectDelay->exponential;
 
-  return Meter(mcfg);
+  return Inverter(mcfg);
 }
 
 std::expected<void, ModbusError> ModbusMaster::connect() {
-  // Start the Meter connection thread
-  auto res = meter_.connect();
+  // Start the inverter connection thread
+  auto res = inverter_.connect();
   if (!res) {
     return std::unexpected(res.error());
   }
 
   // Wait for successful connection (blocks until connected)
-  meter_.waitForConnection();
+  inverter_.waitForConnection();
 
   return {};
 }
 
 std::expected<void, ModbusError> ModbusMaster::printModbusInfo() {
   // --- Manufacturer and model ---
-  auto mfg = meter_.getManufacturer();
+  auto mfg = inverter_.getManufacturer();
   if (!mfg) {
     return std::unexpected(mfg.error());
   } else
     modbusLogger_->info("Manufacturer: {}", mfg.value());
 
-  auto deviceModel = meter_.getDeviceModel();
+  auto deviceModel = inverter_.getDeviceModel();
   if (!deviceModel) {
     return std::unexpected(deviceModel.error());
   } else
     modbusLogger_->info("Model: {}", deviceModel.value());
 
-  // --- Device serial number and firwmare version
-  auto serial = meter_.getSerialNumber();
+  // --- Device serial number and firmware version
+  auto serial = inverter_.getSerialNumber();
   if (!serial) {
     return std::unexpected(serial.error());
   } else
     modbusLogger_->info("Serial number: {}", serial.value());
 
-  auto version = meter_.getFwVersion();
+  auto version = inverter_.getFwVersion();
   if (!version) {
     return std::unexpected(version.error());
   } else
     modbusLogger_->info("Firmware version: {}", version.value());
 
-  // --- Meter ID, register map type and number of phases ---
-  modbusLogger_->info("Meter ID {}: {} register model, {} phase{}",
-                      meter_.getId(),
-                      meter_.getUseFloatRegisters() ? "float" : "int+sf",
-                      meter_.getPhases(), (meter_.getPhases() > 1 ? "s" : ""));
+  // --- Inverter ID, register map type and number of phases ---
+  modbusLogger_->info(
+      "Inverter ID {}: {} register model, {} phase{}", inverter_.getId(),
+      inverter_.getUseFloatRegisters() ? "float" : "int+sf",
+      inverter_.getPhases(), (inverter_.getPhases() > 1 ? "s" : ""));
 
   // --- Modbus slave address ---
-  auto remoteSlaveId = meter_.getModbusDeviceAddress();
+  auto remoteSlaveId = inverter_.getModbusDeviceAddress();
   if (!remoteSlaveId) {
     return std::unexpected(remoteSlaveId.error());
   } else {
@@ -203,7 +204,7 @@ std::expected<void, ModbusError> ModbusMaster::printModbusInfo() {
 }
 
 std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
-  auto regs = meter_.fetchMeterRegisters();
+  auto regs = inverter_.fetchInverterRegisters();
   if (!regs) {
     return std::unexpected(regs.error());
   }
@@ -213,23 +214,32 @@ std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
   values.time = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch())
                     .count();
-  values.energy = meter_.getAcEnergyActiveImport(Meter::Phase::TOTAL) * 1e-3;
-  values.powerTotal = meter_.getAcPowerActive(Fronius::Phase::TOTAL);
-  values.powerPhase1 = meter_.getAcPowerActive(Fronius::Phase::PHA);
-  values.powerPhase2 = meter_.getAcPowerActive(Fronius::Phase::PHB);
-  values.powerPhase3 = meter_.getAcPowerActive(Fronius::Phase::PHC);
-  values.voltagePhase1 = meter_.getAcVoltage(Fronius::Phase::PHA);
-  values.voltagePhase2 = meter_.getAcVoltage(Fronius::Phase::PHB);
-  values.voltagePhase3 = meter_.getAcVoltage(Fronius::Phase::PHC);
+  values.acEnergy = inverter_.getAcEnergy() * 1e-3;
+  values.acPhase1.voltage = inverter_.getAcVoltage(Fronius::Phase::PHA);
+  if (inverter_.getPhases() > 1) {
+    values.acPhase2.voltage = inverter_.getAcVoltage(Fronius::Phase::PHB);
+    values.acPhase3.voltage = inverter_.getAcVoltage(Fronius::Phase::PHC);
+  }
+  values.acPhase1.current = inverter_.getAcCurrent(Fronius::Phase::PHA);
+  if (inverter_.getPhases() > 1) {
+    values.acPhase2.current = inverter_.getAcCurrent(Fronius::Phase::PHB);
+    values.acPhase3.current = inverter_.getAcCurrent(Fronius::Phase::PHC);
+  }
+  values.acPowerActive = inverter_.getAcPowerActive();
+  values.acPowerReactive = inverter_.getAcPowerReactive();
+  values.acPowerApparent = inverter_.getAcPowerApparent();
+  values.acFrequency = inverter_.getAcFrequency();
+  values.dcPower = inverter_.getDcPower();
+  values.acEfficiency =
+      safeDivide(values.acPowerActive, values.dcPower, modbusLogger_.get(),
+                 "AC efficiency: division by zero or near-zero DC power");
+  values.feedInTariff = cfg_.feedInTariff;
 
   nlohmann::json newJson;
 
   newJson["time"] = std::to_string(values.time);
   newJson["energy"] = PreciseDouble{values.energy, 1};
   newJson["power_total"] = PreciseDouble{values.powerTotal, 0};
-  newJson["power_ph1"] = PreciseDouble{values.powerPhase1, 0};
-  newJson["power_ph2"] = PreciseDouble{values.powerPhase2, 0};
-  newJson["power_ph3"] = PreciseDouble{values.powerPhase3, 0};
   newJson["voltage_ph1"] = PreciseDouble{values.voltagePhase1, 2};
   newJson["voltage_ph2"] = PreciseDouble{values.voltagePhase2, 2};
   newJson["voltage_ph3"] = PreciseDouble{values.voltagePhase3, 2};
