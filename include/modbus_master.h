@@ -24,6 +24,7 @@ public:
   struct MpptTracker {
     double voltage{0.0};
     double current{0.0};
+    double power{0.0};
     double energy{0.0};
   };
 
@@ -39,14 +40,14 @@ public:
     AcPhase acPhase2;
     AcPhase acPhase3;
     double acPowerActive{0.0};
-    double acPowerReactive{0.0};
     double acPowerApparent{0.0};
+    double acPowerReactive{0.0};
     double acPowerFactor{0.0};
+    double dcPower{0.0};
     double acFrequency{0.0};
     double acEfficiency{0.0};
     MpptTracker dcString1;
     MpptTracker dcString2;
-    double dcPower{0.0};
     double feedInTariff{0.0};
   };
 
