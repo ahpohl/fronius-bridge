@@ -21,34 +21,47 @@ public:
                         SignalHandler &signalHandler);
   virtual ~ModbusMaster();
 
-  struct MpptTracker {
+  // --- data structs ---
+  struct Input {
     double voltage{0.0};
     double current{0.0};
     double power{0.0};
     double energy{0.0};
   };
 
-  struct AcPhase {
+  struct Dc {
+    double power{0.0};
+    Input input1;
+    Input input2;
+  };
+
+  struct Phase {
     double voltage{0.0};
     double current{0.0};
   };
 
+  struct Power {
+    double active{0.0};
+    double apparent{0.0};
+    double reactive{0.0};
+    double factor{0.0};
+  };
+
+  struct Ac {
+    double energy{0.0};
+    Phase phase1;
+    Phase phase2;
+    Phase phase3;
+    Power power;
+    double frequency{0.0};
+    double efficiency{0.0};
+  };
+
   struct Values {
     uint64_t time{0};
-    double acEnergy{0.0};
-    AcPhase acPhase1;
-    AcPhase acPhase2;
-    AcPhase acPhase3;
-    double acPowerActive{0.0};
-    double acPowerApparent{0.0};
-    double acPowerReactive{0.0};
-    double acPowerFactor{0.0};
-    double dcPower{0.0};
-    double acFrequency{0.0};
-    double acEfficiency{0.0};
-    MpptTracker dcString1;
-    MpptTracker dcString2;
     double feedInTariff{0.0};
+    struct Ac ac;
+    struct Dc dc;
   };
 
   std::string getJsonDump(void) const;
@@ -67,7 +80,7 @@ private:
   const ModbusRootConfig &cfg_;
   Inverter inverter_;
   Values values_;
-  nlohmann::json json_;
+  nlohmann::ordered_json json_;
   std::shared_ptr<spdlog::logger> modbusLogger_;
 
   // --- threading / callbacks ---

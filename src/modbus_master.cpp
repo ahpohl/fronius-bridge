@@ -38,15 +38,13 @@ ModbusMaster::ModbusMaster(const ModbusRootConfig &cfg,
 
   inverter_.setErrorCallback([this](const ModbusError &err) {
     if (err.severity == ModbusError::Severity::FATAL) {
-      modbusLogger_->error("FATAL Modbus error: {} (code {})", err.message,
-                           err.code);
+      modbusLogger_->error("FATAL Modbus error: {}", err.toString());
 
       // FATAL error: terminate main loop
       handler_.notify();
 
     } else if (err.severity == ModbusError::Severity::TRANSIENT) {
-      modbusLogger_->debug("Transient Modbus error: {} (code {})", err.message,
-                           err.code);
+      modbusLogger_->debug("Transient Modbus error: {}", err.toString());
 
       // signal to main loop that the device is not ready
       connectedAndValid_.store(false);
@@ -210,75 +208,120 @@ std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
   }
 
   Values values{};
-
   values.time = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch())
                     .count();
-  values.acEnergy = inverter_.getAcEnergy() * 1e-3;
+  values.ac.energy = inverter_.getAcEnergy() * 1e-3;
 
-  // voltage
-  values.acPhase1.voltage = inverter_.getAcVoltage(Fronius::Phase::PHA);
-  if (inverter_.getPhases() > 1) {
-    values.acPhase2.voltage = inverter_.getAcVoltage(Fronius::Phase::PHB);
-    values.acPhase3.voltage = inverter_.getAcVoltage(Fronius::Phase::PHC);
+  // Phase 1
+  values.ac.phase1.voltage = inverter_.getAcVoltage(Fronius::Phase::PHA);
+  values.ac.phase1.current = inverter_.getAcCurrent(Fronius::Phase::PHA);
+
+  // Phase 2 (if available)
+  int numPhases = inverter_.getPhases();
+  if (numPhases > 1) {
+    values.ac.phase2.voltage = inverter_.getAcVoltage(Fronius::Phase::PHB);
+    values.ac.phase2.current = inverter_.getAcCurrent(Fronius::Phase::PHB);
   }
 
-  // current
-  values.acPhase1.current = inverter_.getAcCurrent(Fronius::Phase::PHA);
-  if (inverter_.getPhases() > 1) {
-    values.acPhase2.current = inverter_.getAcCurrent(Fronius::Phase::PHB);
-    values.acPhase3.current = inverter_.getAcCurrent(Fronius::Phase::PHC);
+  // Phase 3 (if available)
+  if (inverter_.getPhases() > 2) {
+    values.ac.phase3.voltage = inverter_.getAcVoltage(Fronius::Phase::PHC);
+    values.ac.phase3.current = inverter_.getAcCurrent(Fronius::Phase::PHC);
   }
 
-  // power
-  values.acPowerActive = inverter_.getAcPowerActive();
-  values.acPowerApparent = inverter_.getAcPowerApparent();
-  values.acPowerReactive = inverter_.getAcPowerReactive();
-  values.dcPower = inverter_.getDcPower();
+  // Power
+  values.ac.power.active = inverter_.getAcPowerActive();
+  values.ac.power.apparent = inverter_.getAcPowerApparent();
+  values.ac.power.reactive = inverter_.getAcPowerReactive();
+  values.dc.power = inverter_.getDcPower();
 
-  values.acFrequency = inverter_.getAcFrequency();
-  values.acEfficiency =
-      safeDivide(values.acPowerActive, values.dcPower, modbusLogger_.get(),
+  values.ac.frequency = inverter_.getAcFrequency();
+  values.ac.efficiency =
+      safeDivide(values.ac.power.active, values.dc.power, modbusLogger_.get(),
                  "AC efficiency: division by zero or near-zero DC power") *
       100;
-
-  // string 1
-  // values.dcString1.voltage = inverter_.get
-  // values.dcString1.current = inverter_.get
-  // values.dcString1.power = inverter_.get
-  // values.dcString1.energy = inverter_.get
-
-  // string 2
-  // values.dcString2.voltage = inverter_.get
-  // values.dcString2.current = inverter_.get
-  // values.dcString2.power = inverter_.get
-  // values.dcString2.energy = inverter_.get
-
   values.feedInTariff = cfg_.feedInTariff;
 
-  nlohmann::json newJson;
+  // --- create JSON string ---
+
+  nlohmann::ordered_json newJson;
+
+  // Create JSON array for phases
+  json phases = json::array();
+
+  // Phase 1
+  phases.push_back({
+      {"id", 1},
+      {"current", PreciseDouble{values.ac.phase1.current, 3}},
+      {"voltage", PreciseDouble{values.ac.phase1.voltage, 2}},
+  });
+
+  // Phase 2 (if available)
+  if (numPhases > 1) {
+    phases.push_back({
+        {"id", 2},
+        {"current", PreciseDouble{values.ac.phase2.current, 3}},
+        {"voltage", PreciseDouble{values.ac.phase2.voltage, 2}},
+    });
+  }
+
+  // Phase 3 (if available)
+  if (numPhases > 2) {
+    phases.push_back({
+        {"id", 3},
+        {"current", PreciseDouble{values.ac.phase3.current, 3}},
+        {"voltage", PreciseDouble{values.ac.phase3.voltage, 2}},
+    });
+  }
+
+  // Power
+  json power = {
+      {"active", PreciseDouble{values.ac.power.active, 1}},
+      {"apparent", PreciseDouble{values.ac.power.apparent, 1}},
+      {"reactive", PreciseDouble{values.ac.power.reactive, 1}},
+      {"factor", PreciseDouble{values.ac.power.factor, 2}},
+  };
 
   newJson["time"] = std::to_string(values.time);
-  newJson["energy"] = PreciseDouble{values.acEnergy, 1};
-  newJson["current"] = PreciseDouble{values.acPhase1.current, 3};
-  newJson["voltage"] = PreciseDouble{values.acPhase1.voltage, 2};
-  newJson["power_active"] = PreciseDouble{values.acPowerActive, 1};
-  newJson["power_apparent"] = PreciseDouble{values.acPowerApparent, 1};
-  newJson["power_reactive"] = PreciseDouble{values.acPowerReactive, 1};
-  newJson["power_factor"] = PreciseDouble{values.acPowerFactor, 2};
-  newJson["frequency"] = PreciseDouble{values.acFrequency, 2};
-  newJson["efficiency"] = PreciseDouble{values.acEfficiency, 1};
   newJson["feed_in_tariff"] = PreciseDouble{values.feedInTariff, 4};
-  /*
-  newJson["string1_voltage"] = PreciseDouble{values.powerTotal, 0};
-  newJson["string1_current"] = PreciseDouble{values.powerTotal, 0};
-  newJson["string1_power"] = PreciseDouble{values.powerTotal, 0};
-  newJson["string1_energy"] = PreciseDouble{values.powerTotal, 0};
-  newJson["string2_voltage"] = PreciseDouble{values.powerTotal, 0};
-  newJson["string2_current"] = PreciseDouble{values.powerTotal, 0};
-  newJson["string2_power"] = PreciseDouble{values.powerTotal, 0};
-  newJson["string2_energy"] = PreciseDouble{values.powerTotal, 0};
-  */
+
+  newJson["ac"] = {
+      {"energy", PreciseDouble{values.ac.energy, 1}},
+      {"phases", phases},
+      {"power", power},
+      {"frequency", PreciseDouble{values.ac.frequency, 2}},
+      {"efficiency", PreciseDouble{values.ac.efficiency, 1}},
+  };
+
+  // ---- Strings array ----
+  json inputs = json::array();
+
+  // String 1
+  inputs.push_back({
+      {"id", 1},
+      {"voltage", PreciseDouble{values.dc.input1.voltage, 0}},
+      {"current", PreciseDouble{values.dc.input1.current, 0}},
+      {"power", PreciseDouble{values.dc.input1.power, 0}},
+      {"energy", PreciseDouble{values.dc.input1.energy, 0}},
+  });
+
+  // String 2 (if available)
+  int numInputs = 2;
+  if (numInputs > 1) {
+    inputs.push_back({
+        {"id", 2},
+        {"voltage", PreciseDouble{values.dc.input2.voltage, 0}},
+        {"current", PreciseDouble{values.dc.input2.current, 0}},
+        {"power", PreciseDouble{values.dc.input2.power, 0}},
+        {"energy", PreciseDouble{values.dc.input2.energy, 0}},
+    });
+  }
+
+  newJson["dc"] = {
+      {"power", PreciseDouble{values.dc.power, 1}},
+      {"inputs", inputs},
+  };
 
   // Update shared JSON with lock
   {

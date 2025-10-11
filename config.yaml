@@ -1,12 +1,12 @@
 modbus:
   tcp:
-    host: localhost
+    host: primo.home.arpa
     port: 502
   rtu:
     device: /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AC009Y6C-if00-port0
     baud: 9600
   slave_id: 1
-  update_interval: 1
+  update_interval: 5
   reconnect_delay:
     min: 5
     max: 320
@@ -16,7 +16,7 @@ modbus:
 mqtt:
   broker: localhost
   port: 1883
-  topic: modbus-master/live
+  topic: fronius-ng/values
   #user: mqtt
   #password: M{jMl{C/4y^6kQJlX+87
   queue_size: 100

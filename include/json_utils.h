@@ -5,7 +5,7 @@
 #include <nlohmann/json.hpp>
 #include <sstream>
 
-using json = nlohmann::json;
+using json = nlohmann::ordered_json;
 
 // --- Custom wrapper for per-value precision
 struct PreciseDouble {
