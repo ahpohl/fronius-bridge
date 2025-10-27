@@ -25,6 +25,12 @@ struct ReconnectDelayConfig {
   bool exponential{true};
 };
 
+// --- Response timeout config ---
+struct ResponseTimeoutConfig {
+  int sec{0};
+  int usec{200000};
+};
+
 // --- Root Modbus config ---
 struct ModbusRootConfig {
   std::optional<ModbusTcpConfig> tcp;
@@ -32,9 +38,11 @@ struct ModbusRootConfig {
 
   int updateInterval{5};
   int slaveId{1};
+  int timeout{1};
 
-  // Optional retry parameters
+  // Optional parameters
   std::optional<ReconnectDelayConfig> reconnectDelay;
+  std::optional<ResponseTimeoutConfig> responseTimeout;
 };
 
 // MQTT config

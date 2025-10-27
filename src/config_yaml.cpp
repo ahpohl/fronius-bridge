@@ -49,6 +49,27 @@ parseReconnectDelay(const YAML::Node &node) {
   return cfg;
 }
 
+static std::optional<ResponseTimeoutConfig>
+parseResponseTimeout(const YAML::Node &node) {
+  if (!node)
+    return std::nullopt;
+
+  ResponseTimeoutConfig cfg;
+  cfg.sec = node["sec"].as<int>(0);
+  cfg.usec = node["usec"].as<int>(200000);
+
+  if (cfg.sec == 0 && cfg.usec == 0) {
+    throw std::invalid_argument(
+        "Both response timeout sec and usec cannot be 0");
+  }
+  if (cfg.sec < 0 || cfg.usec > 999999) {
+    throw std::invalid_argument(
+        "Response timeout usec must be in range 0-999999");
+  }
+
+  return cfg;
+}
+
 static ModbusRootConfig parseModbus(const YAML::Node &node) {
   if (!node)
     throw std::runtime_error("Missing 'modbus' section in config");
@@ -68,10 +89,13 @@ static ModbusRootConfig parseModbus(const YAML::Node &node) {
   // --- Basic parameters ---
   cfg.slaveId = node["slave_id"].as<int>(1);
   cfg.updateInterval = node["update_interval"].as<int>(5);
+  cfg.timeout = node["response_timeout"].as<int>(1);
 
-  // --- Optional reconnect delay ---
+  // --- Optional ---
   if (node["reconnect_delay"])
     cfg.reconnectDelay = parseReconnectDelay(node["reconnect_delay"]);
+  if (node["response_timeout"])
+    cfg.responseTimeout = parseResponseTimeout(node["response_timeout"]);
 
   // --- Validation ---
   if (cfg.slaveId < 1 || cfg.slaveId > 247)

@@ -136,6 +136,10 @@ Inverter ModbusMaster::makeModbusConfig(const ModbusRootConfig &cfg) {
 
   mcfg.slaveId = cfg.slaveId;
 
+  // Response timeout parameters
+  mcfg.secTimeout = cfg.responseTimeout->sec;
+  mcfg.usecTimeout = cfg.responseTimeout->usec;
+
   // Reconnect parameters
   mcfg.reconnectDelay = cfg.reconnectDelay->min;
   mcfg.reconnectDelayMax = cfg.reconnectDelay->max;
