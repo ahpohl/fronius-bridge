@@ -68,7 +68,6 @@ static ModbusRootConfig parseModbus(const YAML::Node &node) {
   // --- Basic parameters ---
   cfg.slaveId = node["slave_id"].as<int>(1);
   cfg.updateInterval = node["update_interval"].as<int>(5);
-  cfg.feedInTariff = node["feed_in_tariff"].as<double>(0);
 
   // --- Optional reconnect delay ---
   if (node["reconnect_delay"])

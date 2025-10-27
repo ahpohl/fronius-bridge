@@ -6,17 +6,16 @@ modbus:
     device: /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AC009Y6C-if00-port0
     baud: 9600
   slave_id: 1
-  update_interval: 5
+  update_interval: 4
   reconnect_delay:
     min: 5
     max: 320
-    exponential: false
-  feed_in_tariff: 0.3914
+    exponential: true
       
 mqtt:
   broker: localhost
   port: 1883
-  topic: fronius-ng/values
+  topic: fronius-ng
   #user: mqtt
   #password: M{jMl{C/4y^6kQJlX+87
   queue_size: 100
@@ -29,5 +28,5 @@ logger:
   level: info               # global default: off | error | warn | info | debug | trace
   modules:
     main: info
-    modbus: trace
+    modbus: debug
     mqtt: info

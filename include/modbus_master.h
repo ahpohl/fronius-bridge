@@ -23,53 +23,48 @@ public:
 
   // --- data structs ---
   struct Input {
-    double voltage{0.0};
-    double current{0.0};
-    double power{0.0};
-    double energy{0.0};
-  };
-
-  struct Dc {
-    double power{0.0};
-    Input input1;
-    Input input2;
+    double dcVoltage{0.0};
+    double dcCurrent{0.0};
+    double dcPower{0.0};
+    double dcEnergy{0.0};
   };
 
   struct Phase {
-    double voltage{0.0};
-    double current{0.0};
-  };
-
-  struct Power {
-    double active{0.0};
-    double apparent{0.0};
-    double reactive{0.0};
-    double factor{0.0};
-  };
-
-  struct Ac {
-    double energy{0.0};
-    Phase phase1;
-    Phase phase2;
-    Phase phase3;
-    Power power;
-    double frequency{0.0};
-    double efficiency{0.0};
+    double acVoltage{0.0};
+    double acCurrent{0.0};
   };
 
   struct Values {
     uint64_t time{0};
-    double feedInTariff{0.0};
-    struct Ac ac;
-    struct Dc dc;
+    double acEnergy{0.0};
+    double acPowerActive{0.0};
+    double acPowerApparent{0.0};
+    double acPowerReactive{0.0};
+    double acPowerFactor{0.0};
+    Phase phase1;
+    Phase phase2;
+    Phase phase3;
+    double acFrequency{0.0};
+    double dcPower{0.0};
+    double efficiency{0.0};
+    Input input1;
+    Input input2;
+  };
+
+  struct Events {
+    int code;                                // Fronius F_Active_State_Code
+    std::string state;                       // Inverter StVnd
+    std::vector<std::string> acEvents;       // Inverter Evt1
+    std::vector<std::string> dcEvents;       // MPPT Evt
+    std::vector<std::string> acVendorEvents; // Inverter EvtVnd1-3
   };
 
   std::string getJsonDump(void) const;
   Values getValues(void) const;
 
-  std::expected<void, ModbusError> connect(void);
   std::expected<void, ModbusError> printModbusInfo();
   std::expected<void, ModbusError> updateValuesAndJson(void);
+  std::expected<void, ModbusError> updateEventsAndJson(void);
 
   void setUpdateCallback(std::function<void(const std::string &)> cb);
 
@@ -80,7 +75,9 @@ private:
   const ModbusRootConfig &cfg_;
   Inverter inverter_;
   Values values_;
-  nlohmann::ordered_json json_;
+  nlohmann::ordered_json jsonValues_;
+  Events events_;
+  nlohmann::ordered_json jsonEvents_;
   std::shared_ptr<spdlog::logger> modbusLogger_;
 
   // --- threading / callbacks ---
@@ -88,7 +85,7 @@ private:
   SignalHandler &handler_;
   mutable std::mutex cbMutex_;
   std::thread worker_;
-  std::atomic<bool> connectedAndValid_{false};
+  std::atomic<bool> connected_{false};
   std::condition_variable cv_;
 };
 

@@ -1,13 +1,16 @@
 #include "modbus_master.h"
 #include "config_yaml.h"
+#include "fronius_types.h"
 #include "inverter.h"
 #include "json_utils.h"
-#include "math_utils.h"
 #include "modbus_config.h"
 #include <chrono>
 #include <expected>
+#include <modbus_error.h>
 #include <mutex>
 #include <nlohmann/json.hpp>
+
+using json = nlohmann::ordered_json;
 
 ModbusMaster::ModbusMaster(const ModbusRootConfig &cfg,
                            SignalHandler &signalHandler)
@@ -23,39 +26,40 @@ ModbusMaster::ModbusMaster(const ModbusRootConfig &cfg,
 
     auto valid = inverter_.validateDevice();
     if (!valid) {
-      connectedAndValid_.store(false);
+      connected_.store(false);
     } else {
-      connectedAndValid_.store(true);
       modbusLogger_->info("The inverter is SunSpec v1.0 compatible");
       auto info = printModbusInfo();
+      connected_.store(true);
     }
   });
 
-  inverter_.setDisconnectCallback([this]() {
-    modbusLogger_->warn("Inverter disconnected");
-    connectedAndValid_ = false;
+  inverter_.setDisconnectCallback([this](int delay) {
+    modbusLogger_->warn(
+        "Inverter disconnected, trying to reconnect in {} {}...", delay,
+        delay == 1 ? "second" : "seconds");
   });
 
   inverter_.setErrorCallback([this](const ModbusError &err) {
     if (err.severity == ModbusError::Severity::FATAL) {
-      modbusLogger_->error("FATAL Modbus error: {}", err.toString());
+      modbusLogger_->error("FATAL Modbus error: {}: {} (code {})", err.message,
+                           modbus_strerror(err.code), err.code);
 
       // FATAL error: terminate main loop
       handler_.notify();
 
     } else if (err.severity == ModbusError::Severity::TRANSIENT) {
-      modbusLogger_->debug("Transient Modbus error: {}", err.toString());
+      modbusLogger_->debug("Transient Modbus error: {}: {} (code {})",
+                           err.message, modbus_strerror(err.code), err.code);
 
-      // signal to main loop that the device is not ready
-      connectedAndValid_.store(false);
+      // Mark the connection as disconnected and try to reconnect
+      connected_.store(false);
+      inverter_.triggerReconnect();
     }
   });
 
-  // Connect inverter
-  auto conn = connect();
-  if (!conn) {
-    throw std::runtime_error(conn.error().message);
-  }
+  // Start inverter connect loop
+  inverter_.connect();
 
   // Start update loop thread
   worker_ = std::thread(&ModbusMaster::runLoop, this);
@@ -70,15 +74,15 @@ ModbusMaster::~ModbusMaster() {
 void ModbusMaster::runLoop() {
   while (handler_.isRunning()) {
 
-    if (connectedAndValid_.load()) {
+    if (connected_.load()) {
       auto update = updateValuesAndJson();
       if (!update)
-        connectedAndValid_.store(false);
+        connected_.store(false);
       else {
         std::lock_guard<std::mutex> lock(cbMutex_);
         if (updateCallback_) {
           try {
-            updateCallback_(json_.dump());
+            updateCallback_(jsonValues_.dump());
           } catch (const std::exception &ex) {
             modbusLogger_->error(
                 "FATAL error in ModbusMaster update callback: {}", ex.what());
@@ -86,6 +90,7 @@ void ModbusMaster::runLoop() {
           }
         }
       }
+      auto events = updateEventsAndJson();
     }
 
     std::unique_lock<std::mutex> lock(cbMutex_);
@@ -104,7 +109,7 @@ void ModbusMaster::setUpdateCallback(
 
 std::string ModbusMaster::getJsonDump() const {
   std::lock_guard<std::mutex> lock(cbMutex_);
-  return json_.dump();
+  return jsonValues_.dump();
 }
 
 ModbusMaster::Values ModbusMaster::getValues() const {
@@ -139,19 +144,6 @@ Inverter ModbusMaster::makeModbusConfig(const ModbusRootConfig &cfg) {
   return Inverter(mcfg);
 }
 
-std::expected<void, ModbusError> ModbusMaster::connect() {
-  // Start the inverter connection thread
-  auto res = inverter_.connect();
-  if (!res) {
-    return std::unexpected(res.error());
-  }
-
-  // Wait for successful connection (blocks until connected)
-  inverter_.waitForConnection();
-
-  return {};
-}
-
 std::expected<void, ModbusError> ModbusMaster::printModbusInfo() {
   // --- Manufacturer and model ---
   auto mfg = inverter_.getManufacturer();
@@ -180,10 +172,13 @@ std::expected<void, ModbusError> ModbusMaster::printModbusInfo() {
     modbusLogger_->info("Firmware version: {}", version.value());
 
   // --- Inverter ID, register map type and number of phases ---
+  modbusLogger_->info("Inverter ID {}: {} register model", inverter_.getId(),
+                      inverter_.getUseFloatRegisters() ? "float" : "int+sf");
   modbusLogger_->info(
-      "Inverter ID {}: {} register model, {} phase{}", inverter_.getId(),
-      inverter_.getUseFloatRegisters() ? "float" : "int+sf",
-      inverter_.getPhases(), (inverter_.getPhases() > 1 ? "s" : ""));
+      "Configuration: {} phase{}, {} input{}, {}", inverter_.getPhases(),
+      (inverter_.getPhases() > 1 ? "s" : ""), inverter_.getInputs(),
+      (inverter_.getInputs() > 1 ? "s" : ""),
+      inverter_.isHybrid() ? "hybrid" : "non-hybrid");
 
   // --- Modbus slave address ---
   auto remoteSlaveId = inverter_.getModbusDeviceAddress();
@@ -208,127 +203,183 @@ std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
   }
 
   Values values{};
+
   values.time = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch())
                     .count();
-  values.ac.energy = inverter_.getAcEnergy() * 1e-3;
 
-  // Phase 1
-  values.ac.phase1.voltage = inverter_.getAcVoltage(Fronius::Phase::PHA);
-  values.ac.phase1.current = inverter_.getAcCurrent(Fronius::Phase::PHA);
+  try {
+    // AC values
+    values.acEnergy =
+        ModbusError::ModbusError::getOrThrow(inverter_.getAcEnergy()) * 1e-3;
+    values.acPowerActive =
+        ModbusError::getOrThrow(inverter_.getAcPowerActive());
+    values.acPowerApparent =
+        ModbusError::getOrThrow(inverter_.getAcPowerApparent());
+    values.acPowerReactive =
+        ModbusError::getOrThrow(inverter_.getAcPowerReactive());
+    values.acPowerFactor =
+        ModbusError::getOrThrow(inverter_.getAcPowerFactor());
 
-  // Phase 2 (if available)
-  int numPhases = inverter_.getPhases();
-  if (numPhases > 1) {
-    values.ac.phase2.voltage = inverter_.getAcVoltage(Fronius::Phase::PHB);
-    values.ac.phase2.current = inverter_.getAcCurrent(Fronius::Phase::PHB);
+    // Phase 1
+    values.phase1.acVoltage =
+        ModbusError::getOrThrow(inverter_.getAcVoltage(FroniusTypes::Phase::A));
+    values.phase1.acCurrent =
+        ModbusError::getOrThrow(inverter_.getAcCurrent(FroniusTypes::Phase::A));
+
+    // Phase 2
+    if (inverter_.getPhases() > 1) {
+      values.phase2.acVoltage = ModbusError::getOrThrow(
+          inverter_.getAcVoltage(FroniusTypes::Phase::B));
+      values.phase2.acCurrent = ModbusError::getOrThrow(
+          inverter_.getAcCurrent(FroniusTypes::Phase::B));
+    }
+
+    // Phase 3
+    if (inverter_.getPhases() > 2) {
+      values.phase3.acVoltage = ModbusError::getOrThrow(
+          inverter_.getAcVoltage(FroniusTypes::Phase::C));
+      values.phase3.acCurrent = ModbusError::getOrThrow(
+          inverter_.getAcCurrent(FroniusTypes::Phase::C));
+    }
+
+    values.acFrequency = ModbusError::getOrThrow(inverter_.getAcFrequency());
+
+    // DC values
+    values.dcPower = ModbusError::getOrThrow(
+        inverter_.getDcPower(FroniusTypes::Input::TOTAL));
+    values.input1.dcPower =
+        ModbusError::getOrThrow(inverter_.getDcPower(FroniusTypes::Input::A));
+    values.input1.dcVoltage =
+        ModbusError::getOrThrow(inverter_.getDcVoltage(FroniusTypes::Input::A));
+    values.input1.dcCurrent =
+        ModbusError::getOrThrow(inverter_.getDcCurrent(FroniusTypes::Input::A));
+    if (!inverter_.isHybrid())
+      values.input1.dcEnergy = ModbusError::getOrThrow(inverter_.getDcEnergy(
+                                   FroniusTypes::Input::A)) *
+                               1e-3;
+
+    if (inverter_.getInputs() == 2) {
+      values.input2.dcPower =
+          ModbusError::getOrThrow(inverter_.getDcPower(FroniusTypes::Input::B));
+      values.input2.dcVoltage = ModbusError::getOrThrow(
+          inverter_.getDcVoltage(FroniusTypes::Input::B));
+      values.input2.dcCurrent = ModbusError::getOrThrow(
+          inverter_.getDcCurrent(FroniusTypes::Input::B));
+      if (!inverter_.isHybrid())
+        values.input2.dcEnergy = ModbusError::getOrThrow(inverter_.getDcEnergy(
+                                     FroniusTypes::Input::B)) *
+                                 1e-3;
+    }
+
+  } catch (const ModbusError &err) {
+    modbusLogger_->warn("{}", err.message);
+    return std::unexpected(err);
   }
 
-  // Phase 3 (if available)
-  if (inverter_.getPhases() > 2) {
-    values.ac.phase3.voltage = inverter_.getAcVoltage(Fronius::Phase::PHC);
-    values.ac.phase3.current = inverter_.getAcCurrent(Fronius::Phase::PHC);
+  if (std::abs(values.dcPower) > 1e-12) {
+    values.efficiency = values.acPowerActive / values.dcPower * 100.0;
+  } else {
+    values.efficiency = 0.0;
   }
 
-  // Power
-  values.ac.power.active = inverter_.getAcPowerActive();
-  values.ac.power.apparent = inverter_.getAcPowerApparent();
-  values.ac.power.reactive = inverter_.getAcPowerReactive();
-  values.dc.power = inverter_.getDcPower();
+  // ---- Build JSON ----
+  json newJson;
 
-  values.ac.frequency = inverter_.getAcFrequency();
-  values.ac.efficiency =
-      safeDivide(values.ac.power.active, values.dc.power, modbusLogger_.get(),
-                 "AC efficiency: division by zero or near-zero DC power") *
-      100;
-  values.feedInTariff = cfg_.feedInTariff;
+  newJson["time"] = values.time;
+  newJson["ac_energy"] = JsonUtils::roundTo(values.acEnergy, 1);
 
-  // --- create JSON string ---
+  // AC power metrics
+  newJson["ac_power_active"] = JsonUtils::roundTo(values.acPowerActive, 1);
+  newJson["ac_power_apparent"] = JsonUtils::roundTo(values.acPowerApparent, 1);
+  newJson["ac_power_reactive"] = JsonUtils::roundTo(values.acPowerReactive, 1);
+  newJson["ac_power_factor"] = JsonUtils::roundTo(values.acPowerFactor, 1);
 
-  nlohmann::ordered_json newJson;
-
-  // Create JSON array for phases
+  // ---- Phases ----
   json phases = json::array();
+  std::array<const Phase *, 3> phaseList = {&values.phase1, &values.phase2,
+                                            &values.phase3};
 
-  // Phase 1
-  phases.push_back({
-      {"id", 1},
-      {"current", PreciseDouble{values.ac.phase1.current, 3}},
-      {"voltage", PreciseDouble{values.ac.phase1.voltage, 2}},
-  });
+  int phaseCount =
+      std::clamp(inverter_.getPhases(), 1, static_cast<int>(phaseList.size()));
 
-  // Phase 2 (if available)
-  if (numPhases > 1) {
+  for (int i = 0; i < phaseCount; ++i) {
     phases.push_back({
-        {"id", 2},
-        {"current", PreciseDouble{values.ac.phase2.current, 3}},
-        {"voltage", PreciseDouble{values.ac.phase2.voltage, 2}},
+        {"id", i + 1},
+        {"ac_voltage", JsonUtils::roundTo(phaseList[i]->acVoltage, 2)},
+        {"ac_current", JsonUtils::roundTo(phaseList[i]->acCurrent, 3)},
     });
   }
 
-  // Phase 3 (if available)
-  if (numPhases > 2) {
-    phases.push_back({
-        {"id", 3},
-        {"current", PreciseDouble{values.ac.phase3.current, 3}},
-        {"voltage", PreciseDouble{values.ac.phase3.voltage, 2}},
-    });
-  }
+  newJson["phases"] = std::move(phases);
+  newJson["ac_frequency"] = JsonUtils::roundTo(values.acFrequency, 2);
+  newJson["dc_power"] = JsonUtils::roundTo(values.dcPower, 1);
+  newJson["efficiency"] = JsonUtils::roundTo(values.efficiency, 1);
 
-  // Power
-  json power = {
-      {"active", PreciseDouble{values.ac.power.active, 1}},
-      {"apparent", PreciseDouble{values.ac.power.apparent, 1}},
-      {"reactive", PreciseDouble{values.ac.power.reactive, 1}},
-      {"factor", PreciseDouble{values.ac.power.factor, 2}},
-  };
-
-  newJson["time"] = std::to_string(values.time);
-  newJson["feed_in_tariff"] = PreciseDouble{values.feedInTariff, 4};
-
-  newJson["ac"] = {
-      {"energy", PreciseDouble{values.ac.energy, 1}},
-      {"phases", phases},
-      {"power", power},
-      {"frequency", PreciseDouble{values.ac.frequency, 2}},
-      {"efficiency", PreciseDouble{values.ac.efficiency, 1}},
-  };
-
-  // ---- Strings array ----
+  // ---- DC Inputs ----
   json inputs = json::array();
+  std::array<const Input *, 2> inputList = {&values.input1, &values.input2};
 
-  // String 1
-  inputs.push_back({
-      {"id", 1},
-      {"voltage", PreciseDouble{values.dc.input1.voltage, 0}},
-      {"current", PreciseDouble{values.dc.input1.current, 0}},
-      {"power", PreciseDouble{values.dc.input1.power, 0}},
-      {"energy", PreciseDouble{values.dc.input1.energy, 0}},
-  });
+  int inputCount =
+      std::clamp(inverter_.getInputs(), 1, static_cast<int>(inputList.size()));
 
-  // String 2 (if available)
-  int numInputs = 2;
-  if (numInputs > 1) {
-    inputs.push_back({
-        {"id", 2},
-        {"voltage", PreciseDouble{values.dc.input2.voltage, 0}},
-        {"current", PreciseDouble{values.dc.input2.current, 0}},
-        {"power", PreciseDouble{values.dc.input2.power, 0}},
-        {"energy", PreciseDouble{values.dc.input2.energy, 0}},
-    });
+  for (int i = 0; i < inputCount; ++i) {
+    json input = {
+        {"id", i + 1},
+        {"dc_voltage", JsonUtils::roundTo(inputList[i]->dcVoltage, 2)},
+        {"dc_current", JsonUtils::roundTo(inputList[i]->dcCurrent, 3)},
+        {"dc_power", JsonUtils::roundTo(inputList[i]->dcPower, 1)},
+    };
+
+    if (!inverter_.isHybrid()) {
+      input["dc_energy"] = JsonUtils::roundTo(inputList[i]->dcEnergy, 1);
+    }
+
+    inputs.push_back(std::move(input));
   }
 
-  newJson["dc"] = {
-      {"power", PreciseDouble{values.dc.power, 1}},
-      {"inputs", inputs},
-  };
+  newJson["inputs"] = std::move(inputs);
 
-  // Update shared JSON with lock
+  // ---- Commit values ----
   {
     std::lock_guard<std::mutex> lock(cbMutex_);
-    json_ = std::move(newJson);
+    jsonValues_ = std::move(newJson);
+    values_ = std::move(values);
   }
 
-  modbusLogger_->debug("{}", json_.dump());
+  modbusLogger_->debug("{}", jsonValues_.dump());
+
+  return {};
+}
+
+std::expected<void, ModbusError> ModbusMaster::updateEventsAndJson() {
+  Events newEvents;
+
+  try {
+    newEvents.state = ModbusError::getOrThrow(inverter_.getState());
+    newEvents.acEvents = ModbusError::getOrThrow(inverter_.getEvents());
+  } catch (const ModbusError &err) {
+    modbusLogger_->warn("{}", err.message);
+    return std::unexpected(err);
+  }
+
+  // ---- Build JSON ----
+  json newJson;
+
+  newJson["state"] = newEvents.state;
+  newJson["ac_events"] = nlohmann::json::array();
+  for (const auto &e : newEvents.acEvents) {
+    newJson["ac_events"].push_back(e);
+  }
+
+  // ---- Commit events ----
+  {
+    std::lock_guard<std::mutex> lock(cbMutex_);
+    jsonEvents_ = std::move(newJson);
+    events_ = std::move(newEvents);
+  }
+
+  modbusLogger_->debug("{}", jsonEvents_.dump());
+
   return {};
 }

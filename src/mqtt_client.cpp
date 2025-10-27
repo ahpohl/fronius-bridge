@@ -116,8 +116,9 @@ void MqttClient::run() {
       std::string payload = queue_.front();
 
       lock.unlock();
-      int rc = mosquitto_publish(mosq_, nullptr, opt_c_str(cfg_.topic),
-                                 payload.size(), payload.c_str(), 1, true);
+      int rc =
+          mosquitto_publish(mosq_, nullptr, opt_c_str(cfg_.topic + "/values"),
+                            payload.size(), payload.c_str(), 1, true);
       lock.lock();
 
       if (rc == MOSQ_ERR_SUCCESS) {
@@ -138,31 +139,28 @@ void MqttClient::run() {
   mqttLogger_->debug("MQTT client run loop stopped.");
 }
 
-// --- static callbacks ---
-
-void MqttClient::onConnect(struct mosquitto *mosq, void *obj, int rc) {
+void MqttClient::onConnect(struct mosquitto *, void *obj, int rc) {
   MqttClient *self = static_cast<MqttClient *>(obj);
+  self->connected_ = (rc == 0);
+  self->cv_.notify_one();
 
-  if (rc == 0) {
-    self->connected_ = true;
-    self->cv_.notify_one();
-    self->mqttLogger_->info("MQTT connected successfully");
-  } else {
-    self->mqttLogger_->warn("MQTT connect failed: {} ({}), will retry...",
+  if (rc == 0)
+    self->mqttLogger_->info("MQTT connected");
+  else
+    self->mqttLogger_->warn("MQTT connection failed: {} ({}), will retry...",
                             mosquitto_strerror(rc), rc);
-  }
 }
 
 void MqttClient::onDisconnect(struct mosquitto *mosq, void *obj, int rc) {
   MqttClient *self = static_cast<MqttClient *>(obj);
-
   self->connected_ = false;
 
   if (rc == 0) {
     self->mqttLogger_->info("MQTT disconnected cleanly");
   } else {
-    self->mqttLogger_->warn("MQTT connection failed: {} ({}), will retry...",
-                            mosquitto_strerror(rc), rc);
+    self->mqttLogger_->warn(
+        "MQTT disconnected unexpectedly: {} ({}), will retry...",
+        mosquitto_strerror(rc), rc);
   }
 }
 

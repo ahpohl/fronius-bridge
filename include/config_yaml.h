@@ -32,7 +32,6 @@ struct ModbusRootConfig {
 
   int updateInterval{5};
   int slaveId{1};
-  double feedInTariff{0};
 
   // Optional retry parameters
   std::optional<ReconnectDelayConfig> reconnectDelay;
