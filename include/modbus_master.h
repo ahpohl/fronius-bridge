@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <queue>
 #include <spdlog/logger.h>
 #include <thread>
 
@@ -51,7 +52,7 @@ public:
     Input input2;
   };
 
-  struct States {
+  struct Events {
     int activeCode;                  // Fronius F_Active_State_Code
     std::string state;               // Inverter StVnd
     std::vector<std::string> events; // Inverter EvtVnd1-3
@@ -70,14 +71,15 @@ public:
 private:
   void runLoop();
   Inverter makeModbusConfig(const ModbusRootConfig &cfg);
-
-  const ModbusRootConfig &cfg_;
   Inverter inverter_;
-  Values values_;
-  nlohmann::ordered_json jsonValues_;
-  States states_;
-  nlohmann::ordered_json jsonEvents_;
+  const ModbusRootConfig &cfg_;
   std::shared_ptr<spdlog::logger> modbusLogger_;
+
+  // --- values and events
+  Values values_;
+  Events events_;
+  nlohmann::ordered_json jsonValues_;
+  nlohmann::ordered_json jsonEvents_;
 
   // --- threading / callbacks ---
   std::function<void(const std::string &)> updateCallback_;

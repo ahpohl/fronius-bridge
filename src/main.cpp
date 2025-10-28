@@ -54,8 +54,9 @@ int main(int argc, char *argv[]) {
 
   // --- Start MQTT consumer ---
   MqttClient mqtt(cfg.mqtt, handler);
-  master.setUpdateCallback(
-      [&mqtt](const std::string &jsonDump) { mqtt.publishValues(jsonDump); });
+  master.setUpdateCallback([&mqtt, &cfg](const std::string &jsonDump) {
+    mqtt.publish(jsonDump, cfg.mqtt.topic + "/values");
+  });
   master.setEventCallback([&mqtt, &cfg](const std::string &jsonDump) {
     mqtt.publish(jsonDump, cfg.mqtt.topic + "/events");
   });

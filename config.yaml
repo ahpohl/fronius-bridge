@@ -21,7 +21,7 @@ mqtt:
   topic: fronius-ng
   #user: mqtt
   #password: M{jMl{C/4y^6kQJlX+87
-  queue_size: 100
+  queue_size: 10
   reconnect_delay:
     min: 2
     max: 64

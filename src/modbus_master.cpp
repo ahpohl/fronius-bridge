@@ -380,12 +380,12 @@ std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
 }
 
 std::expected<void, ModbusError> ModbusMaster::updateEventsAndJson() {
-  States newStates;
+  Events newEvents;
 
   try {
-    newStates.activeCode = inverter_.getActiveStateCode();
-    newStates.state = ModbusError::getOrThrow(inverter_.getState());
-    newStates.events = ModbusError::getOrThrow(inverter_.getEvents());
+    newEvents.activeCode = inverter_.getActiveStateCode();
+    newEvents.state = ModbusError::getOrThrow(inverter_.getState());
+    newEvents.events = ModbusError::getOrThrow(inverter_.getEvents());
   } catch (const ModbusError &err) {
     modbusLogger_->warn("{}", err.message);
     return std::unexpected(err);
@@ -394,10 +394,10 @@ std::expected<void, ModbusError> ModbusMaster::updateEventsAndJson() {
   // ---- Build JSON ----
   json newJson;
 
-  newJson["active_code"] = newStates.activeCode;
-  newJson["state"] = newStates.state;
+  newJson["active_code"] = newEvents.activeCode;
+  newJson["state"] = newEvents.state;
   newJson["ac_events"] = nlohmann::json::array();
-  for (const auto &e : newStates.events) {
+  for (const auto &e : newEvents.events) {
     newJson["ac_events"].push_back(e);
   }
 
@@ -405,7 +405,7 @@ std::expected<void, ModbusError> ModbusMaster::updateEventsAndJson() {
   {
     std::lock_guard<std::mutex> lock(cbMutex_);
     jsonEvents_ = std::move(newJson);
-    states_ = std::move(newStates);
+    events_ = std::move(newEvents);
   }
 
   modbusLogger_->debug("{}", jsonEvents_.dump());

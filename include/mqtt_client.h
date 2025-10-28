@@ -34,16 +34,18 @@ private:
   struct mosquitto *mosq_ = nullptr;
   std::thread worker_;
   SignalHandler &handler_;
-
-  // Queue
-  std::queue<std::string> queue_;
   std::mutex mutex_;
   std::condition_variable cv_;
-  size_t droppedCount_ = 0;
 
-  // Payloads
+  // --- queued messages setup
+  struct QueuedMessage {
+    std::string payload;
+  };
+  std::map<std::string, std::queue<QueuedMessage>> topicQueues_;
   std::unordered_map<std::string, std::size_t> lastPayloadHashes_;
+  std::map<std::string, size_t> droppedCount_;
 
+  // --- callbacks
   static void onConnect(struct mosquitto *mosq, void *obj, int rc);
   static void onDisconnect(struct mosquitto *mosq, void *obj, int rc);
   static void onLog(struct mosquitto *mosq, void *obj, int level,

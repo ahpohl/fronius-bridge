@@ -71,100 +71,83 @@ MqttClient::~MqttClient() {
   mosquitto_lib_cleanup();
 }
 
-void MqttClient::publishValues(const std::string &values) {
+void MqttClient::publish(const std::string &payload, const std::string &topic) {
   std::unique_lock<std::mutex> lock(mutex_);
 
-  if (queue_.size() >= cfg_.queueSize) {
-    queue_.pop();    // remove oldest
-    droppedCount_++; // track total drops
+  // Duplicate suppression per topic
+  std::size_t payloadHash = std::hash<std::string>{}(payload);
+  auto itHash = lastPayloadHashes_.find(topic);
+  if (itHash != lastPayloadHashes_.end() && itHash->second == payloadHash)
+    return;
+  lastPayloadHashes_[topic] = payloadHash;
+
+  // Per-topic queue reference
+  auto &q = topicQueues_[topic];
+
+  // If topic queue is full, drop oldest for that topic
+  if (q.size() >= cfg_.queueSize) { // can be per-topic limit if you add one
+    q.pop();                        // remove oldest for this topic
+    droppedCount_[topic]++;         // track total drops for this topic
   }
 
-  queue_.push(values); // push new message
+  q.push({payload}); // push new message
 
   // Logging only if disconnected
   if (!connected_.load()) {
-    if (droppedCount_ > 0) {
-      mqttLogger_->warn(
-          "MQTT queue full, dropped oldest message (total dropped: {})",
-          droppedCount_);
+    if (droppedCount_[topic] > 0) {
+      mqttLogger_->warn("MQTT queue full for topic '{}', dropped oldest "
+                        "message (total dropped: {})",
+                        topic, droppedCount_[topic]);
     } else {
-      if (queue_.size() > 0)
+      if (q.size() > 0) {
         mqttLogger_->debug(
-            "Waiting for MQTT connection... ({} messages cached)",
-            queue_.size());
+            "Waiting for MQTT connection... ({} messages cached for '{}')",
+            q.size(), topic);
+      }
     }
   }
 
-  cv_.notify_one(); // wake up the consumer thread
-}
-
-void MqttClient::publish(const std::string &payload, const std::string &topic) {
-  int rc = MOSQ_ERR_SUCCESS;
-  std::size_t payloadHash = std::hash<std::string>{}(payload);
-
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    auto it = lastPayloadHashes_.find(topic);
-    if (it != lastPayloadHashes_.end() && it->second == payloadHash) {
-      return;
-    }
-    rc = mosquitto_publish(mosq_, nullptr, opt_c_str(topic), payload.size(),
-                           payload.c_str(), 1, true);
-    if (rc == MOSQ_ERR_SUCCESS) {
-      lastPayloadHashes_[topic] = payloadHash;
-    }
-  }
-
-  if (rc == MOSQ_ERR_SUCCESS) {
-    mqttLogger_->debug("Published MQTT message to topic '{}': {}", topic,
-                       payload);
-  } else {
-    mqttLogger_->error("MQTT publish failed: {}", mosquitto_strerror(rc));
-  }
+  cv_.notify_one();
 }
 
 void MqttClient::run() {
-  std::string topic = cfg_.topic + "/values";
-
   while (handler_.isRunning()) {
     std::unique_lock<std::mutex> lock(mutex_);
 
-    // --- First wait until connected or shutdown ---
-    cv_.wait(lock, [&] { return connected_.load() || !handler_.isRunning(); });
+    cv_.wait(lock, [&] {
+      return connected_.load() &&
+                 std::any_of(topicQueues_.begin(), topicQueues_.end(),
+                             [](auto &p) { return !p.second.empty(); }) ||
+             !handler_.isRunning();
+    });
+
     if (!handler_.isRunning())
       break;
 
-    // --- Then wait until we have something to publish or shutdown ---
-    cv_.wait(lock, [&] { return !queue_.empty() || !handler_.isRunning(); });
-    if (!handler_.isRunning())
-      break;
+    for (auto &[topic, q] : topicQueues_) {
+      while (!q.empty() && connected_.load()) {
+        auto payload = q.front().payload;
+        lock.unlock();
 
-    // --- Now both conditions are true: connected and queue not empty ---
-    while (!queue_.empty() && connected_.load() && handler_.isRunning()) {
-      std::string payload = queue_.front();
+        int rc = mosquitto_publish(mosq_, nullptr, opt_c_str(topic),
+                                   payload.size(), payload.c_str(), 1, true);
 
-      lock.unlock();
-      int rc = mosquitto_publish(mosq_, nullptr, opt_c_str(topic),
-                                 payload.size(), payload.c_str(), 1, true);
-      lock.lock();
-
-      if (rc == MOSQ_ERR_SUCCESS) {
-        queue_.pop();
-        mqttLogger_->debug("Published MQTT message to topic '{}': {}", topic,
-                           payload);
-      } else {
-        mqttLogger_->error("MQTT publish failed: {}", mosquitto_strerror(rc));
-        break;
+        lock.lock();
+        if (rc == MOSQ_ERR_SUCCESS) {
+          q.pop();
+          mqttLogger_->debug("Published MQTT message to topic '{}': {}", topic,
+                             payload);
+          droppedCount_[topic] = 0;
+        } else {
+          mqttLogger_->error("MQTT publish failed for '{}': {}", topic,
+                             mosquitto_strerror(rc));
+          break;
+        }
       }
     }
-
-    // Reset dropped count once queue is empty
-    if (queue_.empty()) {
-      droppedCount_ = 0;
-    }
   }
-  mqttLogger_->debug("MQTT client run loop stopped.");
+
+  mqttLogger_->debug("MQTT run loop stopped.");
 }
 
 void MqttClient::onConnect(struct mosquitto *, void *obj, int rc) {
