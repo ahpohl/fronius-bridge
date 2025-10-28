@@ -46,7 +46,7 @@ ModbusMaster::ModbusMaster(const ModbusRootConfig &cfg,
                            modbus_strerror(err.code), err.code);
 
       // FATAL error: terminate main loop
-      handler_.notify();
+      handler_.shutdown();
 
     } else if (err.severity == ModbusError::Severity::TRANSIENT) {
       modbusLogger_->debug("Transient Modbus error: {}: {} (code {})",
@@ -88,14 +88,16 @@ void ModbusMaster::runLoop() {
           } catch (const std::exception &ex) {
             modbusLogger_->error(
                 "FATAL error in ModbusMaster update callback: {}", ex.what());
-            handler_.notify();
+            handler_.shutdown();
           }
         }
       }
 
       // --- Update events ---
       auto events = updateEventsAndJson();
-      if (events) {
+      if (!events) {
+        connected_.store(false);
+      } else {
         std::lock_guard<std::mutex> lock(cbMutex_);
         if (eventCallback_) {
           try {
@@ -103,7 +105,7 @@ void ModbusMaster::runLoop() {
           } catch (const std::exception &ex) {
             modbusLogger_->error(
                 "FATAL error in ModbusMaster event callback: {}", ex.what());
-            handler_.notify();
+            handler_.shutdown();
           }
         }
       }
@@ -396,9 +398,9 @@ std::expected<void, ModbusError> ModbusMaster::updateEventsAndJson() {
 
   newJson["active_code"] = newEvents.activeCode;
   newJson["state"] = newEvents.state;
-  newJson["ac_events"] = nlohmann::json::array();
+  newJson["events"] = nlohmann::json::array();
   for (const auto &e : newEvents.events) {
-    newJson["ac_events"].push_back(e);
+    newJson["events"].push_back(e);
   }
 
   // ---- Commit events ----

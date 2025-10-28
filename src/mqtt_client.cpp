@@ -18,7 +18,7 @@ MqttClient::MqttClient(const MqttConfig &cfg, SignalHandler &signalHandler)
   mosq_ = mosquitto_new(nullptr, true, this);
   if (!mosq_) {
     mqttLogger_->critical("Failed to create mosquitto client");
-    handler_.notify();
+    handler_.shutdown();
   }
 
   // Set username/password if provided
@@ -42,7 +42,7 @@ MqttClient::MqttClient(const MqttConfig &cfg, SignalHandler &signalHandler)
   if (rc != MOSQ_ERR_SUCCESS) {
     mqttLogger_->critical("Failed to start mosquitto network loop: {} ({})",
                           mosquitto_strerror(rc), rc);
-    handler_.notify();
+    handler_.shutdown();
   }
 
   // Connect to broker

@@ -4,7 +4,6 @@
 #include <atomic>
 #include <condition_variable>
 #include <csignal>
-#include <cstring>
 #include <mutex>
 
 class SignalHandler {
@@ -15,7 +14,7 @@ public:
     action.sa_sigaction = [](int sig, siginfo_t *, void *) {
       if (instance_ && instance_->running_.load()) {
         instance_->signal_ = sig;
-        instance_->notify();
+        instance_->shutdown();
       }
     };
     sigemptyset(&action.sa_mask);
@@ -37,7 +36,7 @@ public:
   SignalHandler &operator=(const SignalHandler &) = delete;
 
   // --- Programmatic shutdown ---
-  void notify() {
+  void shutdown() {
     {
       std::lock_guard<std::mutex> lock(mtx_);
       running_.store(false);
