@@ -11,6 +11,7 @@
 #include <spdlog/logger.h>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 class MqttClient {
 public:
@@ -18,7 +19,8 @@ public:
   ~MqttClient();
 
   // Producer pushes JSON payloads here
-  void publish(const std::string &payload);
+  void publishValues(const std::string &payload);
+  void publish(const std::string &payload, const std::string &topic);
 
 private:
   void run();
@@ -38,6 +40,9 @@ private:
   std::mutex mutex_;
   std::condition_variable cv_;
   size_t droppedCount_ = 0;
+
+  // Payloads
+  std::unordered_map<std::string, std::size_t> lastPayloadHashes_;
 
   static void onConnect(struct mosquitto *mosq, void *obj, int rc);
   static void onDisconnect(struct mosquitto *mosq, void *obj, int rc);

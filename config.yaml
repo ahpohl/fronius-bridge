@@ -6,7 +6,7 @@ modbus:
     device: /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AC009Y6C-if00-port0
     baud: 9600
   slave_id: 1
-   response_timeout:
+  response_timeout:
     sec: 5
     usec: 0
   update_interval: 4
@@ -31,5 +31,5 @@ logger:
   level: info               # global default: off | error | warn | info | debug | trace
   modules:
     main: info
-    modbus: debug
-    mqtt: info
+    modbus: info
+    mqtt: debug

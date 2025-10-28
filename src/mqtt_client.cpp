@@ -1,6 +1,7 @@
 #include "mqtt_client.h"
 #include "config_yaml.h"
 #include "signal_handler.h"
+#include <functional>
 #include <mosquitto.h>
 #include <spdlog/spdlog.h>
 
@@ -70,7 +71,7 @@ MqttClient::~MqttClient() {
   mosquitto_lib_cleanup();
 }
 
-void MqttClient::publish(const std::string &payload) {
+void MqttClient::publishValues(const std::string &values) {
   std::unique_lock<std::mutex> lock(mutex_);
 
   if (queue_.size() >= cfg_.queueSize) {
@@ -78,7 +79,7 @@ void MqttClient::publish(const std::string &payload) {
     droppedCount_++; // track total drops
   }
 
-  queue_.push(payload); // push new message
+  queue_.push(values); // push new message
 
   // Logging only if disconnected
   if (!connected_.load()) {
@@ -97,7 +98,35 @@ void MqttClient::publish(const std::string &payload) {
   cv_.notify_one(); // wake up the consumer thread
 }
 
+void MqttClient::publish(const std::string &payload, const std::string &topic) {
+  int rc = MOSQ_ERR_SUCCESS;
+  std::size_t payloadHash = std::hash<std::string>{}(payload);
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto it = lastPayloadHashes_.find(topic);
+    if (it != lastPayloadHashes_.end() && it->second == payloadHash) {
+      return;
+    }
+    rc = mosquitto_publish(mosq_, nullptr, opt_c_str(topic), payload.size(),
+                           payload.c_str(), 1, true);
+    if (rc == MOSQ_ERR_SUCCESS) {
+      lastPayloadHashes_[topic] = payloadHash;
+    }
+  }
+
+  if (rc == MOSQ_ERR_SUCCESS) {
+    mqttLogger_->debug("Published MQTT message to topic '{}': {}", topic,
+                       payload);
+  } else {
+    mqttLogger_->error("MQTT publish failed: {}", mosquitto_strerror(rc));
+  }
+}
+
 void MqttClient::run() {
+  std::string topic = cfg_.topic + "/values";
+
   while (handler_.isRunning()) {
     std::unique_lock<std::mutex> lock(mutex_);
 
@@ -116,15 +145,14 @@ void MqttClient::run() {
       std::string payload = queue_.front();
 
       lock.unlock();
-      int rc =
-          mosquitto_publish(mosq_, nullptr, opt_c_str(cfg_.topic + "/values"),
-                            payload.size(), payload.c_str(), 1, true);
+      int rc = mosquitto_publish(mosq_, nullptr, opt_c_str(topic),
+                                 payload.size(), payload.c_str(), 1, true);
       lock.lock();
 
       if (rc == MOSQ_ERR_SUCCESS) {
         queue_.pop();
-        mqttLogger_->debug("Published MQTT message to topic '{}': {}",
-                           cfg_.topic, payload);
+        mqttLogger_->debug("Published MQTT message to topic '{}': {}", topic,
+                           payload);
       } else {
         mqttLogger_->error("MQTT publish failed: {}", mosquitto_strerror(rc));
         break;

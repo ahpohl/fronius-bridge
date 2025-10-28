@@ -51,12 +51,10 @@ public:
     Input input2;
   };
 
-  struct Events {
-    int code;                                // Fronius F_Active_State_Code
-    std::string state;                       // Inverter StVnd
-    std::vector<std::string> acEvents;       // Inverter Evt1
-    std::vector<std::string> dcEvents;       // MPPT Evt
-    std::vector<std::string> acVendorEvents; // Inverter EvtVnd1-3
+  struct States {
+    int activeCode;                  // Fronius F_Active_State_Code
+    std::string state;               // Inverter StVnd
+    std::vector<std::string> events; // Inverter EvtVnd1-3
   };
 
   std::string getJsonDump(void) const;
@@ -67,6 +65,7 @@ public:
   std::expected<void, ModbusError> updateEventsAndJson(void);
 
   void setUpdateCallback(std::function<void(const std::string &)> cb);
+  void setEventCallback(std::function<void(const std::string &)> cb);
 
 private:
   void runLoop();
@@ -76,12 +75,13 @@ private:
   Inverter inverter_;
   Values values_;
   nlohmann::ordered_json jsonValues_;
-  Events events_;
+  States states_;
   nlohmann::ordered_json jsonEvents_;
   std::shared_ptr<spdlog::logger> modbusLogger_;
 
   // --- threading / callbacks ---
   std::function<void(const std::string &)> updateCallback_;
+  std::function<void(const std::string &)> eventCallback_;
   SignalHandler &handler_;
   mutable std::mutex cbMutex_;
   std::thread worker_;
