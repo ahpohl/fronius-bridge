@@ -87,12 +87,10 @@ void ModbusMaster::runLoop() {
         std::array<Entry, 3> entries = {{
             {[this] { return updateDeviceAndJson(); },
              [this] { return jsonDevice_.dump(); }, &deviceCallback_},
-
-            {[this] { return updateEventsAndJson(); },
-             [this] { return jsonEvents_.dump(); }, &eventCallback_},
-
             {[this] { return updateValuesAndJson(); },
              [this] { return jsonValues_.dump(); }, &valueCallback_},
+            {[this] { return updateEventsAndJson(); },
+             [this] { return jsonEvents_.dump(); }, &eventCallback_},
         }};
 
         for (const auto &e : entries) {
