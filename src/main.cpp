@@ -54,11 +54,14 @@ int main(int argc, char *argv[]) {
 
   // --- Start MQTT consumer ---
   MqttClient mqtt(cfg.mqtt, handler);
-  master.setUpdateCallback([&mqtt, &cfg](const std::string &jsonDump) {
+  master.setValueCallback([&mqtt, &cfg](const std::string &jsonDump) {
     mqtt.publish(jsonDump, cfg.mqtt.topic + "/values");
   });
   master.setEventCallback([&mqtt, &cfg](const std::string &jsonDump) {
     mqtt.publish(jsonDump, cfg.mqtt.topic + "/events");
+  });
+  master.setDeviceCallback([&mqtt, &cfg](const std::string &jsonDump) {
+    mqtt.publish(jsonDump, cfg.mqtt.topic + "/device");
   });
 
   // --- Wait for shutdown signal ---

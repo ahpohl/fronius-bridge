@@ -29,7 +29,6 @@ ModbusMaster::ModbusMaster(const ModbusRootConfig &cfg,
       connected_.store(false);
     } else {
       modbusLogger_->info("The inverter is SunSpec v1.0 compatible");
-      auto info = printModbusInfo();
       connected_.store(true);
     }
   });
@@ -76,60 +75,78 @@ void ModbusMaster::runLoop() {
 
     if (connected_.load()) {
 
-      // --- Update values ---
-      auto update = updateValuesAndJson();
-      if (!update) {
-        connected_.store(false);
-      } else {
-        std::lock_guard<std::mutex> lock(cbMutex_);
-        if (updateCallback_) {
+      // Inside ModbusMaster::runLoop()
+      {
+        struct Entry {
+          std::function<std::expected<void, ModbusError>()> update;
+          std::function<std::string()> getJson;
+          std::function<void(const std::string &)>
+              *callbackPtr; // pointer to callback
+        };
+
+        std::array<Entry, 3> entries = {{
+            {[this] { return updateDeviceAndJson(); },
+             [this] { return jsonDevice_.dump(); }, &deviceCallback_},
+
+            {[this] { return updateEventsAndJson(); },
+             [this] { return jsonEvents_.dump(); }, &eventCallback_},
+
+            {[this] { return updateValuesAndJson(); },
+             [this] { return jsonValues_.dump(); }, &valueCallback_},
+        }};
+
+        for (const auto &e : entries) {
+          auto result = e.update();
+          if (!result) {
+            connected_.store(false);
+            continue;
+          }
+
+          // Skip if callback not registered
+          if (!*e.callbackPtr)
+            continue;
+
           try {
-            updateCallback_(jsonValues_.dump());
+            std::string json;
+            {
+              std::lock_guard<std::mutex> lock(cbMutex_);
+              json = e.getJson();
+            }
+            (*e.callbackPtr)(json);
           } catch (const std::exception &ex) {
-            modbusLogger_->error(
-                "FATAL error in ModbusMaster update callback: {}", ex.what());
+            modbusLogger_->error("FATAL error in ModbusMaster run loop: {}",
+                                 ex.what());
             handler_.shutdown();
           }
         }
       }
 
-      // --- Update events ---
-      auto events = updateEventsAndJson();
-      if (!events) {
-        connected_.store(false);
-      } else {
-        std::lock_guard<std::mutex> lock(cbMutex_);
-        if (eventCallback_) {
-          try {
-            eventCallback_(jsonEvents_.dump());
-          } catch (const std::exception &ex) {
-            modbusLogger_->error(
-                "FATAL error in ModbusMaster event callback: {}", ex.what());
-            handler_.shutdown();
-          }
-        }
-      }
+      // --- Wait for next update interval ---
+      std::unique_lock<std::mutex> lock(cbMutex_);
+      cv_.wait_for(lock, std::chrono::seconds(cfg_.updateInterval),
+                   [this] { return !handler_.isRunning(); });
     }
 
-    // --- Wait for next update interval ---
-    std::unique_lock<std::mutex> lock(cbMutex_);
-    cv_.wait_for(lock, std::chrono::seconds(cfg_.updateInterval),
-                 [this] { return !handler_.isRunning(); });
+    modbusLogger_->debug("Modbus master run loop stopped.");
   }
-
-  modbusLogger_->debug("Modbus master run loop stopped.");
 }
 
-void ModbusMaster::setUpdateCallback(
+void ModbusMaster::setValueCallback(
     std::function<void(const std::string &)> cb) {
   std::lock_guard<std::mutex> lock(cbMutex_);
-  updateCallback_ = std::move(cb);
+  valueCallback_ = std::move(cb);
 }
 
 void ModbusMaster::setEventCallback(
     std::function<void(const std::string &)> cb) {
   std::lock_guard<std::mutex> lock(cbMutex_);
   eventCallback_ = std::move(cb);
+}
+
+void ModbusMaster::setDeviceCallback(
+    std::function<void(const std::string &)> cb) {
+  std::lock_guard<std::mutex> lock(cbMutex_);
+  deviceCallback_ = std::move(cb);
 }
 
 std::string ModbusMaster::getJsonDump() const {
@@ -171,58 +188,6 @@ Inverter ModbusMaster::makeModbusConfig(const ModbusRootConfig &cfg) {
   mcfg.exponential = cfg.reconnectDelay->exponential;
 
   return Inverter(mcfg);
-}
-
-std::expected<void, ModbusError> ModbusMaster::printModbusInfo() {
-  // --- Manufacturer and model ---
-  auto mfg = inverter_.getManufacturer();
-  if (!mfg) {
-    return std::unexpected(mfg.error());
-  } else
-    modbusLogger_->info("Manufacturer: {}", mfg.value());
-
-  auto deviceModel = inverter_.getDeviceModel();
-  if (!deviceModel) {
-    return std::unexpected(deviceModel.error());
-  } else
-    modbusLogger_->info("Model: {}", deviceModel.value());
-
-  // --- Device serial number and firmware version
-  auto serial = inverter_.getSerialNumber();
-  if (!serial) {
-    return std::unexpected(serial.error());
-  } else
-    modbusLogger_->info("Serial number: {}", serial.value());
-
-  auto version = inverter_.getFwVersion();
-  if (!version) {
-    return std::unexpected(version.error());
-  } else
-    modbusLogger_->info("Firmware version: {}", version.value());
-
-  // --- Inverter ID, register map type and number of phases ---
-  modbusLogger_->info("Inverter ID {}: {} register model", inverter_.getId(),
-                      inverter_.getUseFloatRegisters() ? "float" : "int+sf");
-  modbusLogger_->info(
-      "Configuration: {} phase{}, {} input{}, {}", inverter_.getPhases(),
-      (inverter_.getPhases() > 1 ? "s" : ""), inverter_.getInputs(),
-      (inverter_.getInputs() > 1 ? "s" : ""),
-      inverter_.isHybrid() ? "hybrid" : "non-hybrid");
-
-  // --- Modbus slave address ---
-  auto remoteSlaveId = inverter_.getModbusDeviceAddress();
-  if (!remoteSlaveId) {
-    return std::unexpected(remoteSlaveId.error());
-  } else {
-    // Compare with configured slave ID
-    if (cfg_.slaveId != remoteSlaveId.value()) {
-      modbusLogger_->warn("Configured slave ID ({}) does not match "
-                          "device-reported slave ID ({})",
-                          cfg_.slaveId, remoteSlaveId.value());
-    }
-  }
-
-  return {};
 }
 
 std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
@@ -366,8 +331,9 @@ std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
 
     inputs.push_back(std::move(input));
   }
-
   newJson["inputs"] = std::move(inputs);
+
+  modbusLogger_->debug("{}", newJson.dump());
 
   // ---- Commit values ----
   {
@@ -375,8 +341,6 @@ std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
     jsonValues_ = std::move(newJson);
     values_ = std::move(values);
   }
-
-  modbusLogger_->debug("{}", jsonValues_.dump());
 
   return {};
 }
@@ -403,6 +367,8 @@ std::expected<void, ModbusError> ModbusMaster::updateEventsAndJson() {
     newJson["events"].push_back(e);
   }
 
+  modbusLogger_->debug("{}", newJson.dump());
+
   // ---- Commit events ----
   {
     std::lock_guard<std::mutex> lock(cbMutex_);
@@ -410,7 +376,66 @@ std::expected<void, ModbusError> ModbusMaster::updateEventsAndJson() {
     events_ = std::move(newEvents);
   }
 
-  modbusLogger_->debug("{}", jsonEvents_.dump());
+  return {};
+}
+
+std::expected<void, ModbusError> ModbusMaster::updateDeviceAndJson() {
+  if (deviceUpdated.load())
+    return {};
+
+  Device newDevice;
+
+  try {
+    newDevice.manufacturer =
+        ModbusError::getOrThrow(inverter_.getManufacturer());
+    newDevice.model = ModbusError::getOrThrow(inverter_.getDeviceModel());
+    newDevice.serialNumber =
+        ModbusError::getOrThrow(inverter_.getSerialNumber());
+    newDevice.fwVersion = ModbusError::getOrThrow(inverter_.getFwVersion());
+    newDevice.registerModel =
+        inverter_.getUseFloatRegisters() ? "float" : "int+sf";
+    newDevice.slaveID =
+        ModbusError::getOrThrow(inverter_.getModbusDeviceAddress());
+  } catch (const ModbusError &err) {
+    modbusLogger_->warn("{}", err.message);
+    return std::unexpected(err);
+  }
+
+  newDevice.id = inverter_.getId();
+  newDevice.isHybrid = inverter_.isHybrid();
+  newDevice.inputs = inverter_.getInputs();
+  newDevice.phases = inverter_.getPhases();
+
+  // Compare received slave ID with configured
+  if (cfg_.slaveId != newDevice.slaveID) {
+    modbusLogger_->warn("Slave ID mismatch: configured {}, received {}",
+                        cfg_.slaveId, newDevice.slaveID);
+  }
+
+  // ---- Build ordered JSON ----
+  json newJson;
+
+  newJson["manufacturer"] = newDevice.manufacturer;
+  newJson["model"] = newDevice.model;
+  newJson["serial_number"] = newDevice.serialNumber;
+  newJson["firmware_version"] = newDevice.fwVersion;
+  newJson["register_model"] = newDevice.registerModel;
+  newJson["slave_id"] = newDevice.slaveID;
+  newJson["inverter_id"] = newDevice.id;
+  newJson["hybrid"] = newDevice.isHybrid;
+  newJson["mppt_tracker"] = newDevice.inputs;
+  newJson["phases"] = newDevice.phases;
+
+  modbusLogger_->debug("{}", newJson.dump());
+
+  // ---- Commit values ----
+  {
+    std::lock_guard<std::mutex> lock(cbMutex_);
+    jsonDevice_ = std::move(newJson);
+    device_ = std::move(newDevice);
+  }
+
+  deviceUpdated.store(true);
 
   return {};
 }

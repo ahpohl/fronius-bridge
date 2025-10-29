@@ -12,7 +12,6 @@
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
-#include <queue>
 #include <spdlog/logger.h>
 #include <thread>
 
@@ -53,20 +52,34 @@ public:
   };
 
   struct Events {
-    int activeCode;                  // Fronius F_Active_State_Code
+    int activeCode{0};               // Fronius F_Active_State_Code
     std::string state;               // Inverter StVnd
     std::vector<std::string> events; // Inverter EvtVnd1-3
+  };
+
+  struct Device {
+    int id{0};
+    std::string manufacturer;
+    std::string model;
+    std::string serialNumber;
+    std::string fwVersion;
+    std::string registerModel;
+    bool isHybrid{false};
+    int phases{0};
+    int inputs{0};
+    int slaveID{0};
   };
 
   std::string getJsonDump(void) const;
   Values getValues(void) const;
 
-  std::expected<void, ModbusError> printModbusInfo();
   std::expected<void, ModbusError> updateValuesAndJson(void);
   std::expected<void, ModbusError> updateEventsAndJson(void);
+  std::expected<void, ModbusError> updateDeviceAndJson(void);
 
-  void setUpdateCallback(std::function<void(const std::string &)> cb);
+  void setValueCallback(std::function<void(const std::string &)> cb);
   void setEventCallback(std::function<void(const std::string &)> cb);
+  void setDeviceCallback(std::function<void(const std::string &)> cb);
 
 private:
   void runLoop();
@@ -76,19 +89,23 @@ private:
   std::shared_ptr<spdlog::logger> modbusLogger_;
 
   // --- values and events
+  Device device_;
   Values values_;
   Events events_;
   nlohmann::ordered_json jsonValues_;
   nlohmann::ordered_json jsonEvents_;
+  nlohmann::json jsonDevice_;
 
   // --- threading / callbacks ---
-  std::function<void(const std::string &)> updateCallback_;
+  std::function<void(const std::string &)> valueCallback_;
   std::function<void(const std::string &)> eventCallback_;
+  std::function<void(const std::string &)> deviceCallback_;
   SignalHandler &handler_;
   mutable std::mutex cbMutex_;
   std::thread worker_;
   std::atomic<bool> connected_{false};
   std::condition_variable cv_;
+  std::atomic<bool> deviceUpdated{false};
 };
 
 #endif /* MODBUS_MASTER_H_ */
