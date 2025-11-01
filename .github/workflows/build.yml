@@ -35,8 +35,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          gh release download --repo ahpohl/libfronius --pattern 'libfronius*_amd64.deb' --clobber --latest
-          gh release download --repo ahpohl/libfronius --pattern 'libfronius-dev*_amd64.deb' --clobber --latest
+          gh release download --repo ahpohl/libfronius --pattern 'libfronius*_amd64.deb' --clobber
+          gh release download --repo ahpohl/libfronius --pattern 'libfronius-dev*_amd64.deb' --clobber
           ls -l *.deb
 
       - name: Install libfronius runtime + dev
