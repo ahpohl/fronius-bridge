@@ -1,2 +1,5 @@
-build
-*.log
+build/
+*.o
+*.obj
+*.so
+*.a

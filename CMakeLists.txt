@@ -20,7 +20,7 @@ string(REGEX REPLACE "^v" "" GIT_TAG_STRIPPED "${GIT_TAG}")
 
 # Set some basic project attributes
 project (fronius-ng
-	DESCRIPTION "A Modbus Master talking to a Fronius inverter"
+	DESCRIPTION "Lightweight Modbus-to-MQTT bridge for Fronius inverters"
 	VERSION ${GIT_TAG_STRIPPED}
 	LANGUAGES CXX
 )
