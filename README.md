@@ -1,4 +1,4 @@
-[![Build](https://github.com/ahpohl/fronius-ng/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ahpohl/fronius-ng/actions/workflows/ci.yml)
+[![Build](https://github.com/ahpohl/fronius-ng/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/ahpohl/fronius-ng/actions/workflows/build.yml)
 
 # fronius-ng
 
