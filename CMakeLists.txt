@@ -94,24 +94,24 @@ install(TARGETS ${PROJECT_NAME}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-# --- CPack ---
+# --- CPack (components) ---
 include(InstallRequiredSystemLibraries)
+
+# Global metadata
 set(CPACK_GENERATOR "TGZ;DEB")
 set(CPACK_PACKAGE_NAME "${PROJECT_NAME}")
+set(CPACK_PACKAGE_CONTACT "Alexander Pohl <alex@ahpohl.com>")
 set(CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
 set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
-set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Alexander Pohl <alex@ahpohl.com>")
 
-# Custom archive name for TGZ only (DEB uses canonical naming)
+# DEB naming: canonical names per Debian policy
+set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+set(CPACK_DEBIAN_PACKAGE_SECTION "net")
+
+# TGZ custom archive name
 string(TOLOWER "${CMAKE_SYSTEM_NAME}" OS_NAME)
 string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" ARCH)
 set(CPACK_PACKAGE_FILE_NAME "${PROJECT_NAME}_v${PROJECT_VERSION}_${OS_NAME}_${ARCH}")
-
-# Auto-generate Debian shlib dependencies
-set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
-
-# Note: DEB-DEFAULT makes .deb naming canonical and ignores CPACK_PACKAGE_FILE_NAME.
-set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 
 include(CPack)
