@@ -1,12 +1,12 @@
 #include "modbus_master.h"
 #include "config_yaml.h"
-#include "fronius_types.h"
-#include "inverter.h"
 #include "json_utils.h"
-#include "modbus_config.h"
 #include <chrono>
 #include <expected>
-#include <modbus_error.h>
+#include <fronius/fronius_types.h>
+#include <fronius/inverter.h>
+#include <fronius/modbus_config.h>
+#include <fronius/modbus_error.h>
 #include <mutex>
 #include <nlohmann/json.hpp>
 
@@ -74,8 +74,6 @@ void ModbusMaster::runLoop() {
   while (handler_.isRunning()) {
 
     if (connected_.load()) {
-
-      // Inside ModbusMaster::runLoop()
       {
         struct Entry {
           std::function<std::expected<void, ModbusError>()> update;
@@ -110,6 +108,8 @@ void ModbusMaster::runLoop() {
               std::lock_guard<std::mutex> lock(cbMutex_);
               json = e.getJson();
             }
+
+            // Execute callback outside lock
             (*e.callbackPtr)(json);
           } catch (const std::exception &ex) {
             modbusLogger_->error("FATAL error in ModbusMaster run loop: {}",
@@ -204,14 +204,14 @@ std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
     // AC values
     values.acEnergy =
         ModbusError::ModbusError::getOrThrow(inverter_.getAcEnergy()) * 1e-3;
-    values.acPowerActive =
-        ModbusError::getOrThrow(inverter_.getAcPowerActive());
-    values.acPowerApparent =
-        ModbusError::getOrThrow(inverter_.getAcPowerApparent());
-    values.acPowerReactive =
-        ModbusError::getOrThrow(inverter_.getAcPowerReactive());
-    values.acPowerFactor =
-        ModbusError::getOrThrow(inverter_.getAcPowerFactor());
+    values.acPowerActive = ModbusError::getOrThrow(
+        inverter_.getAcPower(FroniusTypes::Output::ACTIVE));
+    values.acPowerApparent = ModbusError::getOrThrow(
+        inverter_.getAcPower(FroniusTypes::Output::APPARENT));
+    values.acPowerReactive = ModbusError::getOrThrow(
+        inverter_.getAcPower(FroniusTypes::Output::REACTIVE));
+    values.acPowerFactor = ModbusError::getOrThrow(
+        inverter_.getAcPower(FroniusTypes::Output::FACTOR));
 
     // Phase 1
     values.phase1.acVoltage =
@@ -390,10 +390,14 @@ std::expected<void, ModbusError> ModbusMaster::updateDeviceAndJson() {
     newDevice.serialNumber =
         ModbusError::getOrThrow(inverter_.getSerialNumber());
     newDevice.fwVersion = ModbusError::getOrThrow(inverter_.getFwVersion());
+    newDevice.dataManagerVersion =
+        ModbusError::getOrThrow(inverter_.getOptions());
     newDevice.registerModel =
         inverter_.getUseFloatRegisters() ? "float" : "int+sf";
     newDevice.slaveID =
         ModbusError::getOrThrow(inverter_.getModbusDeviceAddress());
+    newDevice.acPowerApparent = ModbusError::getOrThrow(
+        inverter_.getAcPowerRating(FroniusTypes::Output::APPARENT));
   } catch (const ModbusError &err) {
     modbusLogger_->warn("{}", err.message);
     return std::unexpected(err);
@@ -417,12 +421,14 @@ std::expected<void, ModbusError> ModbusMaster::updateDeviceAndJson() {
   newJson["model"] = newDevice.model;
   newJson["serial_number"] = newDevice.serialNumber;
   newJson["firmware_version"] = newDevice.fwVersion;
+  newJson["data_manager"] = newDevice.dataManagerVersion;
   newJson["register_model"] = newDevice.registerModel;
   newJson["slave_id"] = newDevice.slaveID;
   newJson["inverter_id"] = newDevice.id;
   newJson["hybrid"] = newDevice.isHybrid;
   newJson["mppt_tracker"] = newDevice.inputs;
   newJson["phases"] = newDevice.phases;
+  newJson["power_rating"] = newDevice.acPowerApparent;
 
   modbusLogger_->debug("{}", newJson.dump());
 

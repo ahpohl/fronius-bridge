@@ -2,12 +2,12 @@
 #define MODBUS_MASTER_H_
 
 #include "config_yaml.h"
-#include "inverter.h"
 #include "signal_handler.h"
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <expected>
+#include <fronius/inverter.h>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -63,11 +63,13 @@ public:
     std::string model;
     std::string serialNumber;
     std::string fwVersion;
+    std::string dataManagerVersion;
     std::string registerModel;
     bool isHybrid{false};
     int phases{0};
     int inputs{0};
     int slaveID{0};
+    double acPowerApparent{0.0};
   };
 
   std::string getJsonDump(void) const;

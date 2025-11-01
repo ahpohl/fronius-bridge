@@ -16,19 +16,22 @@ int main(int argc, char *argv[]) {
   // --- Command line parsing ---
   CLI::App app{"fronius-ng - Talk to Fronius inverters"};
 
-  bool version = false;
+  // Version string
+  std::string versionStr = std::string("fronius-ng v") + PROJECT_VERSION +
+                           " (" + GIT_COMMIT_HASH + ")";
+
+  app.set_version_flag("-V,--version", versionStr);
+
   std::string config;
-  app.add_flag("-V,--version", version, "Show build info");
-  app.add_option("-c,--config", config, "Set config file")->required();
+  auto configOption = app.add_option("-c,--config", config, "Set config file")
+                          ->required()
+                          ->envname("FRONIUS_CONFIG")
+                          ->check(CLI::ExistingFile);
+
+  // Optional: prevent specifying both at the same time in help/UX
+  configOption->excludes("--version");
 
   CLI11_PARSE(app, argc, argv);
-
-  if (version) {
-    std::cout << "Version: " << PROJECT_VERSION << "\n";
-    std::cout << "Git commit hash: " << GIT_COMMIT_HASH << "\n";
-    std::cout << "Commit date: " << GIT_COMMIT_DATE << "\n";
-    return EXIT_SUCCESS;
-  }
 
   // --- Load config ---
   Config cfg;
