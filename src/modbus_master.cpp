@@ -41,15 +41,13 @@ ModbusMaster::ModbusMaster(const ModbusRootConfig &cfg,
 
   inverter_.setErrorCallback([this](const ModbusError &err) {
     if (err.severity == ModbusError::Severity::FATAL) {
-      modbusLogger_->error("FATAL Modbus error: {}: (code {})", err.message,
-                           err.code);
+      modbusLogger_->error("FATAL Modbus error: {}", err.toString());
 
       // FATAL error: terminate main loop
       handler_.shutdown();
 
     } else if (err.severity == ModbusError::Severity::TRANSIENT) {
-      modbusLogger_->debug("Transient Modbus error: {}: (code {})", err.message,
-                           err.code);
+      modbusLogger_->debug("Transient Modbus error: {}", err.toString());
 
       // Mark the connection as disconnected and try to reconnect
       connected_.store(false);

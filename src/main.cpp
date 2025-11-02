@@ -14,7 +14,7 @@ using json = nlohmann::json;
 int main(int argc, char *argv[]) {
 
   // --- Command line parsing ---
-  CLI::App app{PROJECT_NAME " - Lightweight Modbus-to-MQTT bridge"};
+  CLI::App app{PROJECT_NAME " - " PROJECT_DESCRIPTION};
 
   // Version string
   std::string versionStr = std::string(PROJECT_NAME) + " v" + PROJECT_VERSION +
