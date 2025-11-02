@@ -19,7 +19,7 @@ endif()
 string(REGEX REPLACE "^v" "" GIT_TAG_STRIPPED "${GIT_TAG}")
 
 # Set some basic project attributes
-project (fronius-ng
+project (fronius-bridge
 	DESCRIPTION "Lightweight Modbus-to-MQTT bridge for Fronius inverters"
 	VERSION ${GIT_TAG_STRIPPED}
 	LANGUAGES CXX
@@ -63,7 +63,6 @@ find_package(spdlog REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MOSQUITTO REQUIRED IMPORTED_TARGET libmosquitto)
-pkg_check_modules(MODBUS REQUIRED IMPORTED_TARGET libmodbus)
 
 # --- Sources ---
 set(SRC_FILES
@@ -86,7 +85,6 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     yaml-cpp
     spdlog::spdlog
     PkgConfig::MOSQUITTO
-    PkgConfig::MODBUS
 )
 
 # --- Install (so CPack has something to package) ---

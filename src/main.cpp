@@ -14,10 +14,10 @@ using json = nlohmann::json;
 int main(int argc, char *argv[]) {
 
   // --- Command line parsing ---
-  CLI::App app{"fronius-ng - Talk to Fronius inverters"};
+  CLI::App app{PROJECT_NAME " - Lightweight Modbus-to-MQTT bridge"};
 
   // Version string
-  std::string versionStr = std::string("fronius-ng v") + PROJECT_VERSION +
+  std::string versionStr = std::string(PROJECT_NAME) + " v" + PROJECT_VERSION +
                            " (" + GIT_COMMIT_HASH + ")";
 
   app.set_version_flag("-V,--version", versionStr);

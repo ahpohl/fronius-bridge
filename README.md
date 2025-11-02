@@ -1,8 +1,8 @@
-[![Build](https://github.com/ahpohl/fronius-ng/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/ahpohl/fronius-ng/actions/workflows/build.yml)
+[![Build](https://github.com/ahpohl/fronius-bridge/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/ahpohl/fronius-bridge/actions/workflows/build.yml)
 
-# fronius-ng
+# fronius-bridge
 
-fronius-ng is a lightweight service that reads operational data from Fronius inverters and publishes it to MQTT as JSON. It supports both Modbus TCP (IPv4/IPv6) and Modbus RTU (serial) connections, automatically detects device characteristics, and is fully configurable via a YAML file.
+fronius-bridge is a lightweight service that reads operational data from Fronius inverters and publishes it to MQTT as JSON. It supports both Modbus TCP (IPv4/IPv6) and Modbus RTU (serial) connections, automatically detects device characteristics, and is fully configurable via a YAML file.
 
 ## Features
 
@@ -28,7 +28,6 @@ fronius-ng is a lightweight service that reads operational data from Fronius inv
 ## Dependencies
 
 - [libfronius](https://github.com/ahpohl/libfronius) — Reads values, events, and device info from the inverter
-- [libmodbus](https://libmodbus.org/) — Low-level Modbus communication
 - [libmosquitto](https://mosquitto.org/) — MQTT client library
 - [yaml-cpp](https://github.com/jbeder/yaml-cpp) — YAML configuration parsing
 - [spdlog](https://github.com/gabime/spdlog) — Structured logging
@@ -37,7 +36,7 @@ Ensure the development headers for the above libraries are installed on your sys
 
 ## Configuration
 
-fronius-ng is configured via a YAML file. Below is a complete example followed by a field-by-field reference.
+fronius-bridge is configured via a YAML file. Below is a complete example followed by a field-by-field reference.
 
 ### Example config
 
@@ -62,7 +61,7 @@ modbus:
 mqtt:
   broker: localhost
   port: 1883
-  topic: fronius-ng
+  topic: fronius-bridge
   #user: mqtt
   #password: "secret password"
   queue_size: 10
@@ -105,7 +104,7 @@ logger:
 - mqtt
   - broker: Hostname or IP of the MQTT broker.
   - port: MQTT broker port (1883 for unencrypted, 8883 for TLS, if supported by your setup).
-  - topic: Base MQTT topic to publish under (e.g., fronius-ng). Subtopics may be used for values/events/device info.
+  - topic: Base MQTT topic to publish under (e.g., fronius-bridge). Subtopics may be used for values/events/device info.
   - user: Optional username for broker authentication.
   - password: Optional password for broker authentication.
   - queue_size: Size of the internal publish queue. Increase if bursts of data may outpace network/broker temporarily.
@@ -131,9 +130,9 @@ logger:
 - Consumers should handle retained/non-retained semantics as configured by your deployment (and broker defaults).
 
 Example topics:
-- fronius-ng/values
-- fronius-ng/events
-- fronius-ng/device
+- fronius-bridge/values
+- fronius-bridge/events
+- fronius-bridge/device
 
 ## Troubleshooting
 
@@ -157,4 +156,4 @@ Example topics:
 
 ---
 
-*fronius-ng* is not affiliated with or endorsed by Fronius International GmbH.
+*fronius-bridge* is not affiliated with or endorsed by Fronius International GmbH.
