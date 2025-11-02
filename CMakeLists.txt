@@ -59,6 +59,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # --- Dependencies ---
 find_package(fronius CONFIG REQUIRED)
+find_package(nlohmann_json REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(PkgConfig REQUIRED)
@@ -85,6 +86,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     yaml-cpp
     spdlog::spdlog
     PkgConfig::MOSQUITTO
+    nlohmann_json::nlohmann_json
 )
 
 # --- Install (so CPack has something to package) ---

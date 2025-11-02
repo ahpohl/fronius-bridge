@@ -42,7 +42,8 @@ jobs:
             libmosquitto-dev \
             libyaml-cpp-dev \
             libspdlog-dev \
-            jq
+            jq \
+            nlohmann-json3-dev
 
       # Install libfronius runtime + dev from its Releases
       - name: Download libfronius debs
