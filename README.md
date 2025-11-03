@@ -63,19 +63,20 @@ mqtt:
   port: 1883
   topic: fronius-bridge
   #user: mqtt
-  #password: "secret password"
-  queue_size: 10
+  #password: "your-secret-password"
+  queue_size: 100
   reconnect_delay:
     min: 2
     max: 64
     exponential: true
   
 logger:
-  level: info
+  level: info     # global default: off | error | warn | info | debug | trace
   modules:
     main: info
     modbus: info
-    mqtt: info
+    mqtt: debug
+
 ```
 
 ### Configuration reference
