@@ -353,6 +353,16 @@ std::expected<void, ModbusError> ModbusMaster::updateEventsAndJson() {
     return std::unexpected(err);
   }
 
+  if (!newEvents.events.empty()) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < newEvents.events.size(); ++i) {
+      oss << newEvents.events[i];
+      if (i + 1 < newEvents.events.size())
+        oss << ", ";
+    }
+    modbusLogger_->warn("Inverter reported events: [{}]", oss.str());
+  }
+
   // ---- Build JSON ----
   json newJson;
 
