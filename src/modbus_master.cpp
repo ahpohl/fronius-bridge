@@ -9,6 +9,7 @@
 #include <fronius/modbus_error.h>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <sstream>
 
 using json = nlohmann::ordered_json;
 
