@@ -7,6 +7,7 @@
 #include <fronius/inverter.h>
 #include <fronius/modbus_config.h>
 #include <fronius/modbus_error.h>
+#include <functional>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <sstream>
