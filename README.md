@@ -135,6 +135,154 @@ Example topics:
 - fronius-bridge/events
 - fronius-bridge/device
 
+### Topics and example payloads
+
+**values** (telemetry data):
+
+```jsonc
+{
+  "time": 1699459200000,              // Unix ms epoch, UTC
+  "ac_energy": 12345678,              // Wh
+  "ac_power_active": 4800,            // W
+  "ac_power_apparent": 4850,          // VA
+  "ac_power_reactive": 500,           // var
+  "ac_power_factor": -98,             // percent
+  "phases": [
+    {
+      "id": 1,                        // phase index
+      "ac_voltage": 230.5,            // V
+      "ac_current": 7.2               // A
+    },
+    {
+      "id": 2,
+      "ac_voltage": 229.8,
+      "ac_current": 7.1
+    },
+    {
+      "id": 3,
+      "ac_voltage": 231.2,
+      "ac_current": 7.3
+    }
+  ],
+  "ac_frequency": 50.02,              // Hz
+  "dc_power": 4900,                   // W
+  "efficiency": 97.96,                // %
+  "inputs": [
+    {
+      "id": 1,                        // input index
+      "dc_voltage": 385.2,            // V
+      "dc_current": 6.5,              // A
+      "dc_power": 2503,               // W
+      "dc_energy": 6543210            // Wh
+    },
+    {
+      "id": 2,
+      "dc_voltage": 392.1,
+      "dc_current": 6.1,
+      "dc_power": 2397,
+      "dc_energy": 6123456
+    }
+  ]
+}
+```
+
+**events** (faults/alarms):
+
+```json
+{
+  "time": 1699459200000,
+  "active_code": 307,
+  "state": "Running",
+  "events": []
+}
+```
+
+**device** (static metadata):
+
+```jsonc
+{
+  "manufacturer": "Fronius",
+  "model": "Primo 5.0-1",
+  "serial_number": "12345678",
+  "firmware_version": "1.22.7-1",
+  "data_manager": "3.22.7-1",
+  "register_model": "float",
+  "hybrid": false,
+  "mppt_tracker": 2,
+  "phases": 3,
+  "power_rating": 5000,               // VA
+  "inverter_id": 1,
+  "slave_id": 1
+}
+```
+
+> **Note:** Inline comments (starting with `//`) shown in the examples above are for documentation purposes only and are not part of the actual MQTT JSON payloads.
+
+### Field reference
+
+| Field | Description | Units | Notes |
+|-------|-------------|-------|-------|
+| `time` | Unix millisecond epoch timestamp | ms | UTC |
+| `ac_energy` | Cumulative AC energy produced | Wh | From inverter |
+| `ac_power_active` | Active AC power output | W | |
+| `ac_power_apparent` | Apparent AC power | VA | |
+| `ac_power_reactive` | Reactive AC power | var | |
+| `ac_power_factor` | Power factor | percent | Sign reflects inverter convention; typically -100..100 |
+| `phases[].id` | Phase index | — | Starting at 1 |
+| `phases[].ac_voltage` | AC voltage per phase | V | |
+| `phases[].ac_current` | AC current per phase | A | |
+| `ac_frequency` | AC frequency | Hz | |
+| `dc_power` | Total DC input power | W | Sum of all MPPT inputs |
+| `efficiency` | Inverter efficiency | % | `ac_power_active / dc_power * 100`; 0 when `dc_power` ≈ 0 |
+| `inputs[].id` | DC input index | — | Starting at 1 |
+| `inputs[].dc_voltage` | DC voltage per input | V | |
+| `inputs[].dc_current` | DC current per input | A | |
+| `inputs[].dc_power` | DC power per input | W | |
+| `inputs[].dc_energy` | Cumulative DC energy per input | Wh | Omitted for hybrid models; from inverter |
+| `active_code` | Inverter state code | — | In events JSON |
+| `state` | Human-readable state string | — | In events JSON |
+| `events` | Array of event/alarm strings | — | May be empty |
+| `manufacturer` | Inverter manufacturer | — | In device JSON |
+| `model` | Inverter model string | — | In device JSON |
+| `serial_number` | Inverter serial number | — | In device JSON |
+| `firmware_version` | Inverter firmware version | — | In device JSON |
+| `data_manager` | Data manager version | — | In device JSON options string |
+| `register_model` | Modbus register type | — | "float" or "int+sf" |
+| `hybrid` | Hybrid/storage capability flag | — | Boolean |
+| `mppt_tracker` | Number of DC inputs/trackers | — | Integer count |
+| `phases` | Number of AC phases | — | In device JSON |
+| `power_rating` | Inverter apparent power rating | VA | |
+| `inverter_id` | Inverter ID | — | Integer |
+| `slave_id` | Modbus slave address | — | Integer |
+
+### Power factor sign convention
+
+The `ac_power_factor` field is provided as a percentage as reported by the inverter library. Typical interpretation: positive values indicate lagging (inductive) load behavior, while negative values indicate leading (capacitive) behavior common during feed-in operation. The numeric range observed is typically -100 to 100.
+
+If the sign convention differs from your expectations, consult your Fronius inverter documentation or the specific model's behavior for clarification.
+
+### Energy counters
+
+The `ac_energy` and `dc_energy` fields are cumulative counters maintained by the inverter itself. The application does not reset these counters on restart. The `dc_energy` field per input is omitted for hybrid models. All energy values are in Wh after internal scaling by the inverter library.
+
+If you need per-session energy deltas or other derived metrics, you must compute them externally by tracking changes over time.
+
+### MQTT publish defaults
+
+All MQTT messages are published with **QoS 1** (at least once delivery) and **retained = true** by default, as configured in the `mosquitto_publish` call in `src/mqtt_client.cpp`.
+
+Additional behaviors:
+
+- **Duplicate suppression:** Messages with identical payloads for the same topic (based on hash comparison) are suppressed to reduce redundant publishes.
+- **Queued publishing:** Each topic maintains its own internal queue. If the broker is unreachable, messages are queued up to the configured `queue_size` limit. When the queue fills, the oldest message for that topic is dropped.
+- **Reconnect backoff:** MQTT reconnection attempts use exponential backoff as configured in the `mqtt.reconnect_delay` section of the config file.
+
+**For consumers:**
+
+- Expect retained messages when subscribing to topics for the first time.
+- If you need different QoS levels or non-retained publishing, you will need to modify the source code and rebuild.
+- Handle potential duplicate messages gracefully (QoS 1 does not guarantee exactly-once delivery).
+
 ## Troubleshooting
 
 - Connection timeouts:
