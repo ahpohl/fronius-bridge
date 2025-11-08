@@ -130,10 +130,112 @@ logger:
 - Subtopics include values (telemetry), events (faults/alarms), and device info (static metadata).
 - Consumers should handle retained/non-retained semantics as configured by your deployment (and broker defaults).
 
-Example topics:
-- fronius-bridge/values
-- fronius-bridge/events
-- fronius-bridge/device
+### Topics and example payloads
+
+**fronius-bridge/values**
+```jsonc
+{
+  "time": 1699459200000,           // ms since Unix epoch (UTC)
+  "ac_power": 4523.5,               // W
+  "ac_current": 19.67,              // A
+  "ac_voltage": 230.1,              // V
+  "ac_frequency": 50.01,            // Hz
+  "dc_current": 10.23,              // A
+  "dc_voltage": 442.8,              // V
+  "dc_power": 4531.2,               // W
+  "dc_energy": 12345678,            // Wh (omitted on hybrid models)
+  "ac_energy": 12340000,            // Wh
+  "efficiency": 99.83,              // %
+  "reactive_power": -123.4,         // var
+  "power_factor": 99.9              // % (range -100..100)
+}
+```
+
+**fronius-bridge/events**
+```json
+{
+  "time": 1699459200000,
+  "state_code": 7,
+  "state_message": "Running",
+  "error_code": 0,
+  "error_message": ""
+}
+```
+
+**fronius-bridge/device**
+```jsonc
+{
+  "time": 1699459200000,           // ms since Unix epoch (UTC)
+  "device_type": 123,
+  "power_rating": 5000,             // VA
+  "register_model": 1,
+  "phases": 1,
+  "mppt_trackers": 2,
+  "has_hybrid": false
+}
+```
+
+> **Note**: Inline comments shown above (e.g., `// W`) are for documentation purposes only and are **not** included in actual MQTT payloads.
+
+### Field reference
+
+| Field | Description | Units | Notes |
+|-------|-------------|-------|-------|
+| **values topic** |
+| time | Timestamp when measurement was taken | ms since Unix epoch (UTC) | Common to all topics |
+| ac_power | AC output power | W | Instantaneous measurement |
+| ac_current | AC output current | A | Per-phase or aggregate depending on model |
+| ac_voltage | AC output voltage | V | Per-phase or aggregate depending on model |
+| ac_frequency | Grid frequency | Hz | Typically 50 or 60 Hz |
+| dc_current | DC input current | A | Sum of all MPPT trackers |
+| dc_voltage | DC input voltage | V | Typically from dominant MPPT |
+| dc_power | DC input power | W | Sum of all MPPT trackers |
+| dc_energy | Cumulative DC energy produced | Wh | Omitted on hybrid inverter models |
+| ac_energy | Cumulative AC energy produced | Wh | Total energy delivered to grid/loads |
+| efficiency | Conversion efficiency (DC to AC) | % | Instantaneous efficiency |
+| reactive_power | Reactive power | var | Positive or negative |
+| power_factor | Power factor | % | Range: -100 to +100 |
+| **events topic** |
+| time | Timestamp of event | ms since Unix epoch (UTC) | |
+| state_code | Numeric inverter state code | - | See inverter documentation |
+| state_message | Human-readable state | - | e.g., "Running", "Standby" |
+| error_code | Numeric error/fault code | - | 0 = no error |
+| error_message | Human-readable error description | - | Empty if no error |
+| **device topic** |
+| time | Timestamp of device info snapshot | ms since Unix epoch (UTC) | |
+| device_type | Fronius device type code | - | Model-specific identifier |
+| power_rating | Nominal inverter power rating | VA | Maximum apparent power |
+| register_model | Modbus register layout version | - | Used for register mapping |
+| phases | Number of AC phases | - | 1 or 3 |
+| mppt_trackers | Number of MPPT inputs | - | Typically 1 or 2 |
+| has_hybrid | Indicates hybrid/battery capability | - | Battery support planned |
+
+### Power factor sign convention
+
+The `power_factor` field follows the sign convention used by Fronius inverters:
+
+- **Positive values** (+1 to +100%): Inductive load (current lags voltage).
+- **Negative values** (-1 to -100%): Capacitive load (current leads voltage).
+- **Range**: -100 to +100, where ±100 represents unity power factor (purely resistive).
+
+The sign indicates the phase relationship between voltage and current, not the quality of the power factor.
+
+### Energy counters
+
+- **ac_energy** and **dc_energy** are cumulative counters representing the total energy produced since the inverter was commissioned.
+- Values are in **Wh** (watt-hours) and increment over the lifetime of the inverter.
+- **dc_energy is omitted** on hybrid inverter models due to register layout differences.
+- To calculate energy production over a time interval, consumers must difference successive readings (e.g., `energy_interval = current_reading - previous_reading`).
+
+### MQTT publish defaults
+
+fronius-bridge publishes messages with the following characteristics:
+
+- **QoS 1** (at least once delivery): Ensures messages are reliably delivered even if the broker temporarily disconnects.
+- **Retained messages**: By default, messages are published with the retained flag set, so new subscribers immediately receive the last known values/events/device info.
+- **Duplicate suppression**: Messages are hashed; if the payload is identical to the previous message for a given topic, it is not republished (reduces broker/network load).
+- **Per-topic queueing**: Each topic (values, events, device) has an independent queue to prevent head-of-line blocking.
+- **Reconnect backoff**: If the broker connection is lost, fronius-bridge uses exponential backoff (configurable via `mqtt.reconnect_delay`) to avoid overwhelming the broker during recovery.
 
 ## Troubleshooting
 
