@@ -130,10 +130,134 @@ logger:
 - Subtopics include values (telemetry), events (faults/alarms), and device info (static metadata).
 - Consumers should handle retained/non-retained semantics as configured by your deployment (and broker defaults).
 
-Example topics:
-- fronius-bridge/values
-- fronius-bridge/events
-- fronius-bridge/device
+### Topics and example payloads
+
+- Topic: fronius-bridge/values
+  ```jsonc
+  {
+    "time": 1762607887640, // Unix time in milliseconds since epoch (UTC)
+    "ac_energy": 11060.2,  // Wh
+    "ac_power_active": 238.0,      // W
+    "ac_power_apparent": 238.1,    // VA
+    "ac_power_reactive": 5.0,      // var
+    "ac_power_factor": -100.0,     // % (power factor expressed as percent)
+    "phases": [
+      {
+        "id": 1,
+        "ac_voltage": 235.9, // V
+        "ac_current": 1.0    // A
+      }
+    ],
+    "ac_frequency": 50.0,   // Hz
+    "dc_power": 285.2,      // W
+    "efficiency": 83.4,     // %
+    "inputs": [
+      {
+        "id": 1,
+        "dc_voltage": 294.2, // V
+        "dc_current": 0.45,  // A
+        "dc_power": 132.4,   // W
+        "dc_energy": 5468.4  // Wh (omitted on hybrid models)
+      },
+      {
+        "id": 2,
+        "dc_voltage": 293.9, // V
+        "dc_current": 0.52,  // A
+        "dc_power": 152.8,   // W
+        "dc_energy": 0.1     // Wh (omitted on hybrid models)
+      }
+    ]
+  }
+  ```
+
+- Topic: fronius-bridge/events
+  ```json
+  {
+    "active_code": 0,
+    "state": "Tracking power point",
+    "events": []
+  }
+  ```
+
+- Topic: fronius-bridge/device
+  ```jsonc
+  {
+    "data_manager": "3.32.1-2",
+    "firmware_version": "0.3.30.2",
+    "hybrid": false,
+    "inverter_id": 101,
+    "manufacturer": "Fronius",
+    "model": "Primo 4.0-1",
+    "mppt_tracker": 2,
+    "phases": 1,
+    "power_rating": 4000.0, // VA (apparent power rating)
+    "register_model": "int+sf", // or "float"
+    "serial_number": "34119102",
+    "slave_id": 1
+  }
+  ```
+
+> Note: Comments in the examples are for documentation only. Actual MQTT payloads are plain JSON without comments.
+
+### Field reference
+
+| Field                         | Description                                               | Units | Notes |
+|------------------------------|-----------------------------------------------------------|-------|-------|
+| time                         | Timestamp (Unix epoch)                                    | ms    | UTC milliseconds since epoch |
+| ac_energy                    | Cumulative AC energy                                      | Wh    | Sourced from inverter counter |
+| ac_power_active              | Active AC power                                           | W     | Instantaneous |
+| ac_power_apparent            | Apparent AC power                                         | VA    | Instantaneous |
+| ac_power_reactive            | Reactive AC power                                         | var   | Instantaneous |
+| ac_power_factor              | Power factor                                              | %     | Typically range -100..100; sign per inverter convention |
+| phases[].id                  | Phase index                                               | —     | Starts at 1 |
+| phases[].ac_voltage          | Per-phase AC voltage                                      | V     | — |
+| phases[].ac_current          | Per-phase AC current                                      | A     | — |
+| ac_frequency                 | AC frequency                                              | Hz    | — |
+| dc_power                     | Total DC input power                                      | W     | Sum of inputs |
+| efficiency                   | Conversion efficiency                                     | %     | Computed as ac_power_active / dc_power * 100; 0 when dc_power ≈ 0 |
+| inputs[].id                  | DC input index                                            | —     | Starts at 1 |
+| inputs[].dc_voltage          | DC input voltage                                          | V     | — |
+| inputs[].dc_current          | DC input current                                          | A     | — |
+| inputs[].dc_power            | DC input power                                            | W     | — |
+| inputs[].dc_energy           | Cumulative DC energy per input                            | Wh    | Omitted on hybrid models; sourced from inverter counter |
+| active_code                  | Inverter active state code                                | —     | Events JSON |
+| state                        | Inverter state string                                     | —     | Events JSON |
+| events                       | Array of event strings                                    | —     | Events JSON; may be empty |
+| manufacturer                 | Inverter manufacturer                                     | —     | Device JSON |
+| model                        | Inverter model                                            | —     | Device JSON |
+| serial_number                | Inverter serial number                                    | —     | Device JSON |
+| firmware_version             | Inverter firmware version                                 | —     | Device JSON |
+| data_manager                 | Data manager/options version                              | —     | Device JSON |
+| register_model               | Register model used                                       | —     | "float" or "int+sf" |
+| hybrid                       | Hybrid/storage capable                                    | —     | Battery currently not supported |
+| mppt_tracker                 | Number of DC inputs / MPPT trackers                       | —     | Device JSON |
+| phases                       | Number of AC phases                                       | —     | Device JSON |
+| power_rating                 | Apparent power rating                                     | VA    | Device JSON |
+| inverter_id                  | Inverter numeric ID                                       | —     | Device JSON |
+| slave_id                     | Inverter Modbus address                                   | —     | Device JSON |
+
+### Power factor sign convention
+
+ac_power_factor is provided as a percentage exactly as reported by the inverter via the Fronius register map. Typical interpretation is:
+- Positive values for lagging (inductive) load
+- Negative values for leading (capacitive) feed-in
+
+The observed numeric range is approximately -100..100. If your installation uses a different sign convention, refer to the official Fronius documentation for your model and firmware.
+
+### Energy counters
+
+- ac_energy and inputs[].dc_energy are cumulative counters maintained by the inverter. The application does not reset these values on restart.
+- inputs[].dc_energy is omitted on hybrid models.
+- Units are Wh after internal scaling.
+- If you need per-session or per-interval deltas, compute them in your consumer by differencing successive readings.
+
+### MQTT publish defaults
+
+- QoS: 1
+- Retained: true
+- Duplicate suppression: the publisher suppresses consecutive duplicates per topic (hash comparison of payload).
+- Queueing: messages are queued per topic up to mqtt.queue_size and published when connected; reconnect uses exponential backoff as configured.
+- Consumers should be prepared to receive retained messages on subscribe and handle at-least-once delivery semantics.
 
 ## Troubleshooting
 
