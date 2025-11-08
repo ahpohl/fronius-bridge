@@ -47,7 +47,7 @@ int main(int argc, char *argv[]) {
   std::shared_ptr<spdlog::logger> mainLogger = spdlog::get("main");
   if (!mainLogger)
     mainLogger = spdlog::default_logger();
-  mainLogger->info("Starting fronius-ng with config '{}'", config);
+  mainLogger->info("Starting {} with config '{}'", PROJECT_NAME, config);
 
   // --- Setup signals and shutdown
   SignalHandler handler;
