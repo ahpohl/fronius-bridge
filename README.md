@@ -203,9 +203,9 @@ logger:
 |------------------------------|-----------------------------------------------------------|-------|-------|
 | time                         | Timestamp (Unix epoch)                                    | ms    | UTC milliseconds since epoch |
 | ac_energy                    | Cumulative AC energy                                      | Wh    | Sourced from inverter counter |
-| ac_power_active              | Active AC power                                           | W     | Instantaneous |
-| ac_power_apparent            | Apparent AC power                                         | VA    | Instantaneous |
-| ac_power_reactive            | Reactive AC power                                         | var   | Instantaneous |
+| ac_power_active              | Active AC power                                           | W     | — |
+| ac_power_apparent            | Apparent AC power                                         | VA    | — |
+| ac_power_reactive            | Reactive AC power                                         | var   | — |
 | ac_power_factor              | Power factor                                              | %     | Typically range -100..100; sign per inverter convention |
 | phases[].id                  | Phase index                                               | —     | Starts at 1 |
 | phases[].ac_voltage          | Per-phase AC voltage                                      | V     | — |
@@ -217,7 +217,7 @@ logger:
 | inputs[].dc_voltage          | DC input voltage                                          | V     | — |
 | inputs[].dc_current          | DC input current                                          | A     | — |
 | inputs[].dc_power            | DC input power                                            | W     | — |
-| inputs[].dc_energy           | Cumulative DC energy per input                            | Wh    | Omitted on hybrid models; sourced from inverter counter |
+| inputs[].dc_energy           | Cumulative DC energy per input                            | Wh    | Omitted on hybrid models |
 | active_code                  | Inverter active state code                                | —     | — |
 | state                        | Inverter state string                                     | —     | — |
 | events                       | Array of event strings                                    | —     | may be empty |
