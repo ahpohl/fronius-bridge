@@ -135,36 +135,36 @@ logger:
 - Topic: fronius-bridge/values
   ```jsonc
   {
-    "time": 1762607887640, // Unix time in milliseconds since epoch (UTC)
-    "ac_energy": 11060.2,  // Wh
-    "ac_power_active": 238.0,      // W
-    "ac_power_apparent": 238.1,    // VA
-    "ac_power_reactive": 5.0,      // var
-    "ac_power_factor": -100.0,     // % (power factor expressed as percent)
+    "time": 1762607887640,
+    "ac_energy": 11060.2,
+    "ac_power_active": 238.0,
+    "ac_power_apparent": 238.1,
+    "ac_power_reactive": 5.0,
+    "ac_power_factor": -100.0,
     "phases": [
       {
         "id": 1,
-        "ac_voltage": 235.9, // V
-        "ac_current": 1.0    // A
+        "ac_voltage": 235.9,
+        "ac_current": 1.0
       }
     ],
-    "ac_frequency": 50.0,   // Hz
-    "dc_power": 285.2,      // W
-    "efficiency": 83.4,     // %
+    "ac_frequency": 50.0,
+    "dc_power": 285.2,
+    "efficiency": 83.4,
     "inputs": [
       {
         "id": 1,
-        "dc_voltage": 294.2, // V
-        "dc_current": 0.45,  // A
-        "dc_power": 132.4,   // W
-        "dc_energy": 5468.4  // Wh (omitted on hybrid models)
+        "dc_voltage": 294.2,
+        "dc_current": 0.45,
+        "dc_power": 132.4,
+        "dc_energy": 5468.4
       },
       {
         "id": 2,
-        "dc_voltage": 293.9, // V
-        "dc_current": 0.52,  // A
-        "dc_power": 152.8,   // W
-        "dc_energy": 0.1     // Wh (omitted on hybrid models)
+        "dc_voltage": 293.9,
+        "dc_current": 0.52,
+        "dc_power": 152.8,
+        "dc_energy": 0.1
       }
     ]
   }
@@ -196,8 +196,6 @@ logger:
     "slave_id": 1
   }
   ```
-
-> Note: Comments in the examples are for documentation only. Actual MQTT payloads are plain JSON without comments.
 
 ### Field reference
 

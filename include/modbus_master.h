@@ -97,6 +97,7 @@ private:
   nlohmann::ordered_json jsonValues_;
   nlohmann::ordered_json jsonEvents_;
   nlohmann::json jsonDevice_;
+  std::optional<std::size_t> lastEventsHash_;
 
   // --- threading / callbacks ---
   std::function<void(const std::string &)> valueCallback_;

@@ -361,7 +361,14 @@ std::expected<void, ModbusError> ModbusMaster::updateEventsAndJson() {
       if (i + 1 < newEvents.events.size())
         oss << ", ";
     }
-    modbusLogger_->warn("Inverter reported events: [{}]", oss.str());
+    const std::size_t currentHash = std::hash<std::string>{}(oss.str());
+
+    if (!lastEventsHash_.has_value() || currentHash != *lastEventsHash_) {
+      modbusLogger_->warn("Inverter reported events: [{}]", oss.str());
+      lastEventsHash_ = currentHash;
+    }
+  } else {
+    lastEventsHash_.reset();
   }
 
   // ---- Build JSON ----
