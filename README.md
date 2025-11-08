@@ -130,10 +130,72 @@ logger:
 - Subtopics include values (telemetry), events (faults/alarms), and device info (static metadata).
 - Consumers should handle retained/non-retained semantics as configured by your deployment (and broker defaults).
 
-Example topics:
-- fronius-bridge/values
-- fronius-bridge/events
-- fronius-bridge/device
+### Topics and example payloads
+
+- Topic: fronius-bridge/values
+  ```json
+  {
+    "time": 1762607887640,
+    "ac_energy": 11060.2,
+    "ac_power_active": 238.0,
+    "ac_power_apparent": 238.1,
+    "ac_power_reactive": 5.0,
+    "ac_power_factor": -100.0,
+    "phases": [
+      {
+        "id": 1,
+        "ac_voltage": 235.9,
+        "ac_current": 1.0
+      }
+    ],
+    "ac_frequency": 50.0,
+    "dc_power": 285.2,
+    "efficiency": 83.4,
+    "inputs": [
+      {
+        "id": 1,
+        "dc_voltage": 294.2,
+        "dc_current": 0.45,
+        "dc_power": 132.4,
+        "dc_energy": 5468.4
+      },
+      {
+        "id": 2,
+        "dc_voltage": 293.9,
+        "dc_current": 0.52,
+        "dc_power": 152.8,
+        "dc_energy": 0.1
+      }
+    ]
+  }
+  ```
+
+- Topic: fronius-bridge/events
+  ```json
+  {
+    "active_code": 0,
+    "state": "Tracking power point",
+    "events": []
+  }
+  ```
+
+- Topic: fronius-bridge/device
+  ```json
+  {
+    "data_manager": "3.32.1-2",
+    "firmware_version": "0.3.30.2",
+    "hybrid": false,
+    "inverter_id": 101,
+    "manufacturer": "Fronius",
+    "model": "Primo 4.0-1",
+    "mppt_tracker": 2,
+    "phases": 1,
+    "power_rating": 4000.0,
+    "register_model": "int+sf",
+    "serial_number": "34119102",
+    "slave_id": 1
+  }
+  ```
 
 ## Troubleshooting
 
