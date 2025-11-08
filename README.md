@@ -190,8 +190,8 @@ logger:
     "model": "Primo 4.0-1",
     "mppt_tracker": 2,
     "phases": 1,
-    "power_rating": 4000.0, // VA (apparent power rating)
-    "register_model": "int+sf", // or "float"
+    "power_rating": 4000.0,
+    "register_model": "int+sf",
     "serial_number": "34119102",
     "slave_id": 1
   }
@@ -218,21 +218,21 @@ logger:
 | inputs[].dc_current          | DC input current                                          | A     | — |
 | inputs[].dc_power            | DC input power                                            | W     | — |
 | inputs[].dc_energy           | Cumulative DC energy per input                            | Wh    | Omitted on hybrid models; sourced from inverter counter |
-| active_code                  | Inverter active state code                                | —     | Events JSON |
-| state                        | Inverter state string                                     | —     | Events JSON |
-| events                       | Array of event strings                                    | —     | Events JSON; may be empty |
-| manufacturer                 | Inverter manufacturer                                     | —     | Device JSON |
-| model                        | Inverter model                                            | —     | Device JSON |
-| serial_number                | Inverter serial number                                    | —     | Device JSON |
-| firmware_version             | Inverter firmware version                                 | —     | Device JSON |
-| data_manager                 | Data manager/options version                              | —     | Device JSON |
+| active_code                  | Inverter active state code                                | —     | — |
+| state                        | Inverter state string                                     | —     | — |
+| events                       | Array of event strings                                    | —     | may be empty |
+| manufacturer                 | Inverter manufacturer                                     | —     | — |
+| model                        | Inverter model                                            | —     | — |
+| serial_number                | Inverter serial number                                    | —     | — |
+| firmware_version             | Inverter firmware version                                 | —     | — |
+| data_manager                 | Data manager/options version                              | —     | — |
 | register_model               | Register model used                                       | —     | "float" or "int+sf" |
 | hybrid                       | Hybrid/storage capable                                    | —     | Battery currently not supported |
-| mppt_tracker                 | Number of DC inputs / MPPT trackers                       | —     | Device JSON |
-| phases                       | Number of AC phases                                       | —     | Device JSON |
-| power_rating                 | Apparent power rating                                     | VA    | Device JSON |
-| inverter_id                  | Inverter numeric ID                                       | —     | Device JSON |
-| slave_id                     | Inverter Modbus address                                   | —     | Device JSON |
+| mppt_tracker                 | Number of DC inputs / MPPT trackers                       | —     | — |
+| phases                       | Number of AC phases                                       | —     | — |
+| power_rating                 | Apparent power rating                                     | VA    | — |
+| inverter_id                  | Inverter numeric ID                                       | —     | — |
+| slave_id                     | Inverter Modbus address                                   | —     | — |
 
 ### Power factor sign convention
 
