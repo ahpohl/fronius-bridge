@@ -183,6 +183,11 @@ Inverter ModbusMaster::makeModbusConfig(const ModbusRootConfig &cfg) {
 }
 
 std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
+  if (!handler_.isRunning()) {
+    return std::unexpected(ModbusError::custom(
+        EINTR, "updateValuesAndJson(): Shutdown in progress"));
+  }
+
   auto regs = inverter_.fetchInverterRegisters();
   if (!regs) {
     return std::unexpected(regs.error());
@@ -338,6 +343,11 @@ std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
 }
 
 std::expected<void, ModbusError> ModbusMaster::updateEventsAndJson() {
+  if (!handler_.isRunning()) {
+    return std::unexpected(ModbusError::custom(
+        EINTR, "updateEventsAndJson(): Shutdown in progress"));
+  }
+
   Events newEvents;
 
   try {
@@ -389,6 +399,11 @@ std::expected<void, ModbusError> ModbusMaster::updateEventsAndJson() {
 }
 
 std::expected<void, ModbusError> ModbusMaster::updateDeviceAndJson() {
+  if (!handler_.isRunning()) {
+    return std::unexpected(ModbusError::custom(
+        EINTR, "updateDeviceAndJson(): Shutdown in progress"));
+  }
+
   if (deviceUpdated.load())
     return {};
 
