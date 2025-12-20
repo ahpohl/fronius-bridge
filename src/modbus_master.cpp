@@ -102,31 +102,25 @@ void ModbusMaster::runLoop() {
           if (!*e.callbackPtr)
             continue;
 
-          try {
-            std::string json;
-            {
-              std::lock_guard<std::mutex> lock(cbMutex_);
-              json = e.getJson();
-            }
-
-            // Execute callback outside lock
-            (*e.callbackPtr)(json);
-          } catch (const std::exception &ex) {
-            modbusLogger_->error("FATAL error in ModbusMaster run loop: {}",
-                                 ex.what());
-            handler_.shutdown();
+          std::string json;
+          {
+            std::lock_guard<std::mutex> lock(cbMutex_);
+            json = e.getJson();
           }
+
+          // Execute callback outside lock
+          (*e.callbackPtr)(json);
         }
       }
-
-      // --- Wait for next update interval ---
-      std::unique_lock<std::mutex> lock(cbMutex_);
-      cv_.wait_for(lock, std::chrono::seconds(cfg_.updateInterval),
-                   [this] { return !handler_.isRunning(); });
     }
 
-    modbusLogger_->debug("Modbus master run loop stopped.");
+    // --- Wait for next update interval ---
+    std::unique_lock<std::mutex> lock(cbMutex_);
+    cv_.wait_for(lock, std::chrono::seconds(cfg_.updateInterval),
+                 [this] { return !handler_.isRunning(); });
   }
+
+  modbusLogger_->debug("Modbus master run loop stopped.");
 }
 
 void ModbusMaster::setValueCallback(
