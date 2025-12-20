@@ -43,17 +43,21 @@ ModbusMaster::ModbusMaster(const ModbusRootConfig &cfg,
 
   inverter_.setErrorCallback([this](const ModbusError &err) {
     if (err.severity == ModbusError::Severity::FATAL) {
+      // Fatal error occurred - initiate shutdown sequence
       modbusLogger_->error("FATAL Modbus error: {}", err.describe());
-
-      // FATAL error: terminate main loop
       handler_.shutdown();
 
     } else if (err.severity == ModbusError::Severity::TRANSIENT) {
+      // Temporary error - disconnect and reconnect
       modbusLogger_->debug("Transient Modbus error: {}", err.describe());
-
-      // Mark the connection as disconnected and try to reconnect
       connected_.store(false);
       inverter_.triggerReconnect();
+
+    } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
+      // Shutdown already in progress - just exit cleanly
+      modbusLogger_->trace("Modbus operation cancelled due to shutdown: {}",
+                           err.describe());
+      connected_.store(false);
     }
   });
 
@@ -109,7 +113,8 @@ void ModbusMaster::runLoop() {
           }
 
           // Execute callback outside lock
-          (*e.callbackPtr)(json);
+          if (handler_.isRunning())
+            (*e.callbackPtr)(json);
         }
       }
     }

@@ -52,11 +52,13 @@ int main(int argc, char *argv[]) {
   // --- Setup signals and shutdown
   SignalHandler handler;
 
+  // --- Start MQTT consumer ---
+  MqttClient mqtt(cfg.mqtt, handler);
+
   // --- Start ModbusMaster
   ModbusMaster master(cfg.modbus, handler);
 
-  // --- Start MQTT consumer ---
-  MqttClient mqtt(cfg.mqtt, handler);
+  // --- Setup callbacks
   master.setValueCallback([&mqtt, &cfg](const std::string &jsonDump) {
     mqtt.publish(jsonDump, cfg.mqtt.topic + "/values");
   });
