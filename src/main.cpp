@@ -68,6 +68,10 @@ int main(int argc, char *argv[]) {
   master.setDeviceCallback([&mqtt, &cfg](const std::string &jsonDump) {
     mqtt.publish(jsonDump, cfg.mqtt.topic + "/device");
   });
+  master.setAvailabilityCallback(
+      [&mqtt, &cfg](const std::string &availability) {
+        mqtt.publish(availability, cfg.mqtt.topic + "/availability");
+      });
 
   // --- Wait for shutdown signal ---
   handler.wait();

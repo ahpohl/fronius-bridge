@@ -82,6 +82,7 @@ public:
   void setValueCallback(std::function<void(const std::string &)> cb);
   void setEventCallback(std::function<void(const std::string &)> cb);
   void setDeviceCallback(std::function<void(const std::string &)> cb);
+  void setAvailabilityCallback(std::function<void(const std::string &)> cb);
 
 private:
   void runLoop();
@@ -103,6 +104,7 @@ private:
   std::function<void(const std::string &)> valueCallback_;
   std::function<void(const std::string &)> eventCallback_;
   std::function<void(const std::string &)> deviceCallback_;
+  std::function<void(const std::string &)> availabilityCallback_;
   SignalHandler &handler_;
   mutable std::mutex cbMutex_;
   std::thread worker_;

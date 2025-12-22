@@ -33,12 +33,20 @@ ModbusMaster::ModbusMaster(const ModbusRootConfig &cfg,
       modbusLogger_->info("The inverter is SunSpec v1.0 compatible");
       connected_.store(true);
     }
+
+    if (handler_.isRunning() && availabilityCallback_)
+      availabilityCallback_(connected_.load() ? "connected" : "disconnected");
   });
 
   inverter_.setDisconnectCallback([this](int delay) {
     modbusLogger_->warn(
         "Inverter disconnected, trying to reconnect in {} {}...", delay,
         delay == 1 ? "second" : "seconds");
+
+    connected_.store(false); // Explicit state update
+
+    if (handler_.isRunning() && availabilityCallback_)
+      availabilityCallback_(connected_.load() ? "connected" : "disconnected");
   });
 
   inverter_.setErrorCallback([this](const ModbusError &err) {
@@ -144,6 +152,12 @@ void ModbusMaster::setDeviceCallback(
     std::function<void(const std::string &)> cb) {
   std::lock_guard<std::mutex> lock(cbMutex_);
   deviceCallback_ = std::move(cb);
+}
+
+void ModbusMaster::setAvailabilityCallback(
+    std::function<void(const std::string &)> cb) {
+  std::lock_guard<std::mutex> lock(cbMutex_);
+  availabilityCallback_ = std::move(cb);
 }
 
 std::string ModbusMaster::getJsonDump() const {
