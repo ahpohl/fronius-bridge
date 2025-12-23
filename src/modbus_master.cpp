@@ -34,7 +34,7 @@ ModbusMaster::ModbusMaster(const ModbusRootConfig &cfg,
       connected_.store(true);
     }
 
-    if (handler_.isRunning() && availabilityCallback_)
+    if (availabilityCallback_)
       availabilityCallback_(connected_.load() ? "connected" : "disconnected");
   });
 
@@ -45,7 +45,7 @@ ModbusMaster::ModbusMaster(const ModbusRootConfig &cfg,
 
     connected_.store(false); // Explicit state update
 
-    if (handler_.isRunning() && availabilityCallback_)
+    if (availabilityCallback_)
       availabilityCallback_(connected_.load() ? "connected" : "disconnected");
   });
 
@@ -77,6 +77,11 @@ ModbusMaster::ModbusMaster(const ModbusRootConfig &cfg,
 }
 
 ModbusMaster::~ModbusMaster() {
+  connected_.store(false);
+  if (availabilityCallback_) {
+    availabilityCallback_(connected_.load() ? "connected" : "disconnected");
+  }
+
   cv_.notify_all();
   if (worker_.joinable())
     worker_.join();
