@@ -85,6 +85,8 @@ ModbusMaster::~ModbusMaster() {
   cv_.notify_all();
   if (worker_.joinable())
     worker_.join();
+
+  modbusLogger_->info("Inverter disconnected");
 }
 
 void ModbusMaster::runLoop() {
