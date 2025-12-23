@@ -69,8 +69,9 @@ int main(int argc, char *argv[]) {
     mqtt.publish(jsonDump, cfg.mqtt.topic + "/device");
   });
   master.setAvailabilityCallback(
-      [&mqtt, &cfg](const std::string &availability) {
+      [&mqtt, &cfg, &mainLogger](const std::string &availability) {
         mqtt.publish(availability, cfg.mqtt.topic + "/availability");
+        mainLogger->debug("Availability message queued to MQTT");
       });
 
   // --- Wait for shutdown signal ---
