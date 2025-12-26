@@ -97,8 +97,7 @@ void ModbusMaster::runLoop() {
         struct Entry {
           std::function<std::expected<void, ModbusError>()> update;
           std::function<std::string()> getJson;
-          std::function<void(const std::string &)>
-              *callbackPtr; // pointer to callback
+          std::function<void(std::string)> *callbackPtr; // pointer to callback
         };
 
         std::array<Entry, 3> entries = {{
@@ -143,26 +142,23 @@ void ModbusMaster::runLoop() {
   modbusLogger_->debug("Modbus master run loop stopped.");
 }
 
-void ModbusMaster::setValueCallback(
-    std::function<void(const std::string &)> cb) {
+void ModbusMaster::setValueCallback(std::function<void(std::string)> cb) {
   std::lock_guard<std::mutex> lock(cbMutex_);
   valueCallback_ = std::move(cb);
 }
 
-void ModbusMaster::setEventCallback(
-    std::function<void(const std::string &)> cb) {
+void ModbusMaster::setEventCallback(std::function<void(std::string)> cb) {
   std::lock_guard<std::mutex> lock(cbMutex_);
   eventCallback_ = std::move(cb);
 }
 
-void ModbusMaster::setDeviceCallback(
-    std::function<void(const std::string &)> cb) {
+void ModbusMaster::setDeviceCallback(std::function<void(std::string)> cb) {
   std::lock_guard<std::mutex> lock(cbMutex_);
   deviceCallback_ = std::move(cb);
 }
 
 void ModbusMaster::setAvailabilityCallback(
-    std::function<void(const std::string &)> cb) {
+    std::function<void(std::string)> cb) {
   std::lock_guard<std::mutex> lock(cbMutex_);
   availabilityCallback_ = std::move(cb);
 }

@@ -59,14 +59,14 @@ int main(int argc, char *argv[]) {
   ModbusMaster master(cfg.modbus, handler);
 
   // --- Setup callbacks
-  master.setValueCallback([&mqtt, &cfg](const std::string &jsonDump) {
-    mqtt.publish(jsonDump, cfg.mqtt.topic + "/values");
+  master.setValueCallback([&mqtt, &cfg](std::string jsonDump) {
+    mqtt.publish(std::move(jsonDump), cfg.mqtt.topic + "/values");
   });
-  master.setEventCallback([&mqtt, &cfg](const std::string &jsonDump) {
-    mqtt.publish(jsonDump, cfg.mqtt.topic + "/events");
+  master.setEventCallback([&mqtt, &cfg](std::string jsonDump) {
+    mqtt.publish(std::move(jsonDump), cfg.mqtt.topic + "/events");
   });
-  master.setDeviceCallback([&mqtt, &cfg](const std::string &jsonDump) {
-    mqtt.publish(jsonDump, cfg.mqtt.topic + "/device");
+  master.setDeviceCallback([&mqtt, &cfg](std::string jsonDump) {
+    mqtt.publish(std::move(jsonDump), cfg.mqtt.topic + "/device");
   });
   master.setAvailabilityCallback(
       [&mqtt, &cfg](const std::string &availability) {
