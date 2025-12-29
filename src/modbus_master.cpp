@@ -223,8 +223,7 @@ std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
 
   try {
     // AC values
-    values.acEnergy =
-        ModbusError::ModbusError::getOrThrow(inverter_.getAcEnergy()) * 1e-3;
+    values.acEnergy = ModbusError::getOrThrow(inverter_.getAcEnergy()) * 1e-3;
     values.acPowerActive = ModbusError::getOrThrow(
         inverter_.getAcPower(FroniusTypes::Output::ACTIVE));
     values.acPowerApparent = ModbusError::getOrThrow(
@@ -426,7 +425,7 @@ std::expected<void, ModbusError> ModbusMaster::updateDeviceAndJson() {
         EINTR, "updateDeviceAndJson(): Shutdown in progress"));
   }
 
-  if (deviceUpdated.load())
+  if (deviceUpdated_.load())
     return {};
 
   Device newDevice;
@@ -487,7 +486,7 @@ std::expected<void, ModbusError> ModbusMaster::updateDeviceAndJson() {
     device_ = std::move(newDevice);
   }
 
-  deviceUpdated.store(true);
+  deviceUpdated_.store(true);
 
   return {};
 }

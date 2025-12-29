@@ -2,7 +2,7 @@
 
 # fronius-bridge
 
-fronius-bridge is a lightweight service that reads operational data from Fronius inverters and publishes it to MQTT as JSON.  It supports both Modbus TCP (IPv4/IPv6) and Modbus RTU (serial) connections.
+fronius-bridge is a lightweight service that reads operational data from Fronius inverters and publishes it to MQTT as JSON. It supports both Modbus TCP (IPv4/IPv6) and Modbus RTU (serial) connections.
 
 ## Features
 
@@ -17,7 +17,6 @@ fronius-bridge is a lightweight service that reads operational data from Fronius
   - Number of phases
   - MPPT tracker inputs
   - Hybrid/storage capability (battery currently not supported)
-- PostgreSQL consumer (planned)
 
 ## Status and limitations
 
@@ -43,7 +42,7 @@ fronius-bridge is configured via a YAML file. Below is a complete example follow
 ```yaml
 modbus:
   tcp:
-    host: primo.home. arpa
+    host: primo.home.arpa
     port: 502
   rtu:
     device: /dev/ttyUSB0
@@ -52,7 +51,7 @@ modbus:
   response_timeout: 
     sec: 5
     usec: 0
-  update_interval:  4
+  update_interval: 4
   reconnect_delay: 
     min: 5
     max: 320
@@ -61,7 +60,7 @@ modbus:
 mqtt:
   broker: localhost
   port: 1883
-  topic:  fronius-bridge
+  topic: fronius-bridge
   #user: mqtt
   #password: "your-secret-password"
   queue_size: 100
@@ -71,12 +70,11 @@ mqtt:
     exponential: true
   
 logger:
-  level: info     # global default:  off | error | warn | info | debug | trace
+  level: info     # global default: off | error | warn | info | debug | trace
   modules:
-    main:  info
+    main: info
     modbus: info
     mqtt: debug
-
 ```
 
 ### Configuration reference
@@ -84,10 +82,10 @@ logger:
 - modbus
   - Note: Configure at least one transport (tcp or rtu). If both are configured, TCP takes precedence over RTU.
   - tcp
-    - host:  Hostname or IP (IPv4/IPv6) of the inverter or Modbus TCP gateway. 
+    - host: Hostname or IP (IPv4/IPv6) of the inverter or Modbus TCP gateway. 
     - port: TCP port for Modbus (default is usually 502).
   - rtu
-    - device:  Serial device path (e.g., /dev/ttyUSB0).
+    - device: Serial device path (e.g., /dev/ttyUSB0).
     - baud: Baud rate for RTU (e.g., 9600, 19200, 38400).
   - slave_id: Modbus unit/slave ID of the inverter (typically 1).
   - response_timeout
@@ -98,24 +96,24 @@ logger:
     - Increase if you see frequent timeouts on slow/latent links.
   - update_interval: Polling interval in seconds between reads from the inverter.
   - reconnect_delay
-    - min:  Initial delay (seconds) before attempting to reconnect after a connection error.
+    - min: Initial delay (seconds) before attempting to reconnect after a connection error.
     - max: Maximum delay (seconds) between reconnect attempts. 
     - exponential: If true, uses exponential backoff between min and max; if false, uses a fixed delay.
     
 - mqtt
-  - broker:  Hostname or IP of the MQTT broker. 
+  - broker: Hostname or IP of the MQTT broker. 
   - port: MQTT broker port (1883 for unencrypted, 8883 for TLS, if supported by your setup).
-  - topic: Base MQTT topic to publish under (e.g., fronius-bridge). Subtopics may be used for values/events/device info.
+  - topic: Base MQTT topic to publish under (e.g., fronius-bridge). Subtopics may be used for values/events/device/availability info.
   - user: Optional username for broker authentication.
   - password: Optional password for broker authentication.
-  - queue_size: Size of the internal publish queue.  Increase if bursts of data may outpace network/broker temporarily.
+  - queue_size: Size of the internal publish queue. Increase if bursts of data may outpace network/broker temporarily.
   - reconnect_delay
     - min: Initial delay (seconds) before reconnecting to MQTT after a failure.
     - max: Maximum delay (seconds) between reconnect attempts. 
     - exponential: If true, uses exponential backoff between min and max; if false, uses a fixed delay. 
 
 - logger
-  - level: Global default log level.  Accepted values: off, error, warn, info, debug, trace.
+  - level: Global default log level. Accepted values: off, error, warn, info, debug, trace.
   - modules: Per-module overrides for log levels.
     - main: Log level for the main module.
     - modbus: Log level for Modbus transport/communication.
@@ -141,7 +139,7 @@ logger:
     "ac_power_apparent": 238.1,
     "ac_power_reactive": 5.0,
     "ac_power_factor": -100.0,
-    "phases":  [
+    "phases": [
       {
         "id": 1,
         "ac_voltage": 235.9,
@@ -155,16 +153,16 @@ logger:
       {
         "id": 1,
         "dc_voltage": 294.2,
-        "dc_current":  0.45,
+        "dc_current": 0.45,
         "dc_power": 132.4,
         "dc_energy": 5468.4
       },
       {
         "id": 2,
         "dc_voltage": 293.9,
-        "dc_current":  0.52,
-        "dc_power":  152.8,
-        "dc_energy":  0.1
+        "dc_current": 0.52,
+        "dc_power": 152.8,
+        "dc_energy": 0.1
       }
     ]
   }
@@ -184,7 +182,7 @@ logger:
   {
     "data_manager": "3.32.1-2",
     "firmware_version": "0.3.30. 2",
-    "hybrid":  false,
+    "hybrid": false,
     "inverter_id": 101,
     "manufacturer": "Fronius",
     "model": "Primo 4.0-1",
@@ -193,7 +191,7 @@ logger:
     "power_rating": 4000.0,
     "register_model": "int+sf",
     "serial_number": "34119102",
-    "slave_id":  1
+    "slave_id": 1
   }
   ```
 
@@ -208,7 +206,7 @@ logger:
 
 ### Field reference
 
-| Field                         | Description                                               | Units | Notes |
+| Field                        | Description                                               | Units | Notes |
 |------------------------------|-----------------------------------------------------------|-------|-------|
 | time                         | Timestamp (Unix epoch)                                    | ms    | UTC milliseconds since epoch |
 | ac_energy                    | Cumulative AC energy                                      | Wh    | Sourced from inverter counter |
@@ -246,7 +244,7 @@ logger:
 
 ### Power factor sign convention
 
-ac_power_factor is provided as a percentage exactly as reported by the inverter via the Fronius register map.  Typical interpretation is: 
+ac_power_factor is provided as a percentage exactly as reported by the inverter via the Fronius register map. Typical interpretation is: 
 - Positive values for lagging (inductive) load
 - Negative values for leading (capacitive) feed-in
 
@@ -261,7 +259,7 @@ The observed numeric range is approximately -100.. 100. If your installation use
 
 ### MQTT publish defaults
 
-- QoS:  1
+- QoS: 1
 - Retained: true
 - Duplicate suppression: the publisher suppresses consecutive duplicates per topic (hash comparison of payload).
 - Queueing: messages are queued per topic up to mqtt.queue_size and published when connected; reconnect uses exponential backoff as configured.

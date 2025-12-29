@@ -110,7 +110,7 @@ private:
   std::thread worker_;
   std::atomic<bool> connected_{false};
   std::condition_variable cv_;
-  std::atomic<bool> deviceUpdated{false};
+  std::atomic<bool> deviceUpdated_{false};
 };
 
 #endif /* MODBUS_MASTER_H_ */
