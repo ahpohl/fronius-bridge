@@ -24,7 +24,13 @@ ModbusMaster::ModbusMaster(const ModbusRootConfig &cfg,
 
   // Inverter callbacks
   inverter_.setConnectCallback([this]() {
-    modbusLogger_->info("Inverter connected successfully");
+    if (cfg_.tcp) {
+      auto remote = inverter_.getRemoteEndpoint();
+      modbusLogger_->info("Connected to Fronius inverter at {}:{}", remote.ip,
+                          remote.port);
+    } else {
+      modbusLogger_->info("Inverter connected successfully");
+    }
 
     auto valid = inverter_.validateDevice();
     if (!valid) {
