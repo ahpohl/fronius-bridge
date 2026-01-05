@@ -1,6 +1,12 @@
 build/
-*.o
-*.obj
-*.so
-*.a
+build-aarch64/
+Debug/
+Release/
 deploy.sh
+.clangd/
+
+# Eclipse CDT project files
+.project
+.cproject
+.settings/
+.metadata/
