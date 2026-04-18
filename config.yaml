@@ -1,197 +1,63 @@
-# ==============================================================================
-# fronius-bridge — configuration reference
-# ==============================================================================
-# Configure at least one section under inverter and meter.master to get started.
-# All timeout and delay values are in seconds unless noted otherwise.
-# ==============================================================================
+# ================================
+# fronius-bridge — configuration
+# ================================
 
-
-# ------------------------------------------------------------------------------
-# inverter
-# ------------------------------------------------------------------------------
-# Modbus connection to the Fronius inverter (or a Modbus TCP gateway in front
-# of it). Configure at least one transport (tcp or rtu). If both are present,
-# TCP takes precedence over RTU.
-# ------------------------------------------------------------------------------
 inverter:
-
-  # TCP transport — connect to the inverter over the network (IPv4 or IPv6).
   tcp:
-    host: primo.home.arpa   # Hostname or IP address of the inverter / gateway.
-    port: 502               # Modbus TCP port (default: 502).
-
-  # RTU transport — connect to the inverter over a local serial port.
-  rtu:
-    device: /dev/ttyUSB0    # Serial device path (e.g. /dev/ttyUSB0).
-    baud: 9600              # Baud rate (e.g. 9600, 19200, 38400).
-    data_bits: 8            # Data bits: 5, 6, 7, or 8.
-    stop_bits: 1            # Stop bits: 1 or 2.
-    parity: none            # Parity: none | even | odd.
-
-  unit_id: 1                # Modbus unit / slave ID of the inverter (typically 1).
-
-  # How long to wait for a Modbus response before treating it as a timeout.
-  # Total timeout = sec + usec. Increase on slow or high-latency links.
+    host: primo.home.arpa
+    port: 502
+  unit_id: 1
   response_timeout:
-    sec: 5                  # Seconds component.
-    usec: 0                 # Microseconds component.
-
-  update_interval: 4        # Polling interval in seconds between inverter reads.
-
-  # Reconnect back-off after a connection error.
+    sec: 5
+    usec: 0
+  update_interval: 4
   reconnect_delay:
-    min: 5                  # Initial delay (seconds) before the first reconnect attempt.
-    max: 320                # Upper bound (seconds) on the reconnect interval.
-    exponential: true       # true → exponential back-off between min and max;
-                            # false → fixed delay equal to min.
+    min: 5
+    max: 320
+    exponential: true
 
-
-# ------------------------------------------------------------------------------
-# meter
-# ------------------------------------------------------------------------------
-# Optional. When present, integrates smart meter data into the bridge.
-# The meter section supports two roles that work in tandem:
-#
-#   master — fronius-bridge acts as a Modbus master (client) and reads meter
-#            register data from a remote slave. This is mandatory when the meter
-#            section is configured — without it the slave has no values to serve.
-#
-#            Supported register models:
-#              - Fronius TS65-a  — proprietary register map for direct Modbus RTU
-#                                  communication with a Fronius smart meter, without
-#                                  involving the inverter.
-#              - SunSpec         — standard register model, readable over both TCP
-#                                  and RTU. Covers meters connected to the inverter
-#                                  (accessed via the inverter's Modbus TCP interface
-#                                  in proxy mode) as well as standalone SunSpec-
-#                                  compliant meters such as Easymeter devices
-#                                  exposed via smartmeter-gateway.
-#
-#   slave  — fronius-bridge exposes a SunSpec-compliant Modbus slave (server) so
-#            that a Fronius inverter or another master can read meter values from
-#            it. This is useful when the inverter requires a smart meter on the
-#            bus but the physical meter is not directly Modbus-capable.
-# ------------------------------------------------------------------------------
 meter:
-
-  # ---- meter.master ----------------------------------------------------------
-  # Read meter data from a remote Modbus slave.
-  # Configure at least one transport (tcp or rtu). TCP takes precedence.
-  # ---- meter.master ----------------------------------------------------------
   master:
-
-    # TCP transport — connect to the Modbus slave over the network.
-    tcp:
-      host: localhost         # Hostname or IP of the Modbus slave.
-      port: 502               # Modbus TCP port (default: 502).
-
-    # RTU transport — connect to the Modbus slave over a serial port.
     rtu:
-      device: /dev/ttyUSB1    # Serial device path.
-      baud: 9600              # Baud rate.
-      data_bits: 8            # Data bits: 5, 6, 7, or 8.
-      stop_bits: 1            # Stop bits: 1 or 2.
-      parity: none            # Parity: none | even | odd.
-
-    unit_id: 1                # Modbus unit / slave ID of the remote meter (typically 1).
-
-    # Response timeout — see inverter.response_timeout for guidance.
+      device: /dev/ttyUSB0
+      baud: 9600
+      data_bits: 8
+      stop_bits: 1
+      parity: none
+    unit_id: 1
     response_timeout:
       sec: 5
       usec: 0
-
-    update_interval: 4        # Polling interval in seconds between meter reads.
-
-    # Reconnect back-off — same semantics as inverter.reconnect_delay.
+    update_interval: 4
     reconnect_delay:
       min: 5
       max: 320
       exponential: true
-
-  # ---- meter.slave -----------------------------------------------------------
-  # Expose a Modbus slave (server) that a Fronius inverter or other master can
-  # query for meter values. Configure at least one transport (tcp or rtu).
-  # TCP takes precedence if both are present.
-  # ---- meter.slave -----------------------------------------------------------
   slave:
-
-    # TCP transport — listen for incoming Modbus TCP connections.
     tcp:
-      listen: 0.0.0.0         # Bind address (IPv4 or IPv6). Use 0.0.0.0 for all
-                              # IPv4 interfaces or :: for all IPv6 interfaces.
-      port: 502               # TCP port to listen on (default: 502).
-                              # Note: binding to ports < 1024 requires elevated
-                              # privileges or cap_net_bind_service.
+      listen: 0.0.0.0
+      port: 502
+    unit_id: 1
+    use_float_model: false
 
-    # RTU transport — act as a Modbus RTU slave on a serial port.
-    rtu:
-      device: /dev/ttyUSB2    # Serial device path.
-      baud: 9600              # Baud rate.
-      data_bits: 8            # Data bits: 5, 6, 7, or 8.
-      stop_bits: 1            # Stop bits: 1 or 2.
-      parity: none            # Parity: none | even | odd.
-
-    unit_id: 1                # Modbus unit ID this slave responds to (typically 1).
-
-    request_timeout: 5        # Maximum time (seconds) to wait between requests
-                              # (indications) from the master before considering
-                              # the session stalled.
-
-    idle_timeout: 60          # Disconnect a TCP client that sends no activity for
-                              # this many seconds. Has no effect on RTU transport.
-
-    use_float_model: false    # Register model to expose:
-                              #   false → integer + scale factor registers
-                              #           (compatible with Fronius int+sf register map)
-                              #   true  → 32-bit IEEE 754 float registers
-
-
-# ------------------------------------------------------------------------------
-# mqtt
-# ------------------------------------------------------------------------------
-# Connection to the MQTT broker and publishing behaviour.
-# ------------------------------------------------------------------------------
 mqtt:
-  broker: localhost           # Hostname or IP address of the MQTT broker.
-  port: 1883                  # Broker port: 1883 (unencrypted) or 8883 (TLS).
-  topic: fronius-bridge       # Base topic for all published messages. Subtopics
-                              # (e.g. /values, /events, /device, /availability)
-                              # are appended automatically.
-  user: mqtt                  # Optional username for broker authentication.
-                              # Comment out if the broker allows anonymous access.
-  password: "your-secret-password"  # Optional password. Store the config file
-                                    # with restricted permissions (e.g. 0600).
-  queue_size: 100             # Internal publish-queue depth per topic. Increase
-                              # if bursts of data may outpace the broker temporarily.
-                              # Messages beyond this limit are dropped.
-
-  # Reconnect back-off after losing the broker connection.
+  broker: localhost
+  port: 1883
+  topic: fronius-bridge
+  #user: mqtt
+  #password: "your-secret-password"
+  queue_size: 100
   reconnect_delay:
-    min: 2                    # Initial delay (seconds) before the first reconnect.
-    max: 64                   # Upper bound (seconds) on the reconnect interval.
-    exponential: true         # true → exponential back-off; false → fixed delay.
+    min: 2
+    max: 64
+    exponential: true
 
-
-# ------------------------------------------------------------------------------
-# logger
-# ------------------------------------------------------------------------------
-# Logging is based on spdlog. A global default level applies to all modules
-# unless overridden in the modules map. Per-module levels take precedence over
-# the global level for that specific module.
-#
-# Accepted level values: off | error | warn | info | debug | trace
-#
-# Guidance:
-#   info  — normal production use; connection lifecycle and key events.
-#   debug — protocol details; useful when diagnosing connectivity issues.
-#   trace — verbose frame/register dumps; high volume, use sparingly.
-# ------------------------------------------------------------------------------
 logger:
-  level: info                 # Global default log level.
+  level: info
   modules:
-    main: info                # Application startup, signal handling, lifecycle.
-    mqtt: info                # MQTT client connect / disconnect / publish.
-    inverter: info            # Inverter Modbus reads and register parsing.
+    main: info
+    inverter: info
+    mqtt: info
     meter:
-      master: info            # Meter master (client) Modbus reads.
-      slave: info             # Meter slave (server) Modbus register serving.
+      master: info
+      slave: info
