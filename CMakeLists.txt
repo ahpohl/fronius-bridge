@@ -63,15 +63,44 @@ find_package(spdlog REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(CLI11 REQUIRED)
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(FRONIUS REQUIRED IMPORTED_TARGET libfronius)
+option(FRONIUS_STATIC "Link libfronius statically" OFF)
 pkg_check_modules(MOSQUITTO REQUIRED IMPORTED_TARGET libmosquitto)
+
+if(FRONIUS_STATIC)
+    # pkg-config gives us the library name and search paths; we resolve the
+    # actual .a ourselves so the linker never falls back to the .so.
+    pkg_check_modules(FRONIUS REQUIRED libfronius)
+    find_library(FRONIUS_STATIC_LIB
+        NAMES libfronius.a
+        HINTS ${FRONIUS_LIBRARY_DIRS}
+        REQUIRED
+    )
+    # libfronius.a calls into libmodbus but carries no DT_NEEDED of its own,
+    # so we must pull in libmodbus explicitly as a transitive dependency.
+    find_library(MODBUS_LIB
+        NAMES modbus
+        HINTS ${FRONIUS_LIBRARY_DIRS}
+        REQUIRED
+    )
+    add_library(fronius_static STATIC IMPORTED)
+    set_target_properties(fronius_static PROPERTIES
+        IMPORTED_LOCATION             "${FRONIUS_STATIC_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "${FRONIUS_INCLUDE_DIRS}"
+        INTERFACE_COMPILE_OPTIONS     "${FRONIUS_CFLAGS_OTHER}"
+        INTERFACE_LINK_LIBRARIES      "${MODBUS_LIB}"
+    )
+else()
+    pkg_check_modules(FRONIUS REQUIRED IMPORTED_TARGET libfronius)
+endif()
 
 # --- Sources ---
 set(SRC_FILES
     src/main.cpp
-    src/modbus_master.cpp
+    src/inverter_master.cpp
     src/config_yaml.cpp
     src/mqtt_client.cpp
+    src/meter_master.cpp
+    src/meter_slave.cpp
 )
 
 # --- Executable ---
@@ -88,7 +117,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     nlohmann_json::nlohmann_json
     CLI11::CLI11
     PkgConfig::MOSQUITTO
-    PkgConfig::FRONIUS
+    $<IF:$<BOOL:${FRONIUS_STATIC}>,fronius_static,PkgConfig::FRONIUS>
 )
 
 # --- Install (so CPack has something to package) ---

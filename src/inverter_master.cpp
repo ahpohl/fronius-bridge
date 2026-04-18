@@ -1,5 +1,6 @@
-#include "modbus_master.h"
+#include "inverter_master.h"
 #include "config_yaml.h"
+#include "inverter_types.h"
 #include "json_utils.h"
 #include <chrono>
 #include <expected>
@@ -14,11 +15,11 @@
 
 using json = nlohmann::ordered_json;
 
-ModbusMaster::ModbusMaster(const ModbusRootConfig &cfg,
-                           SignalHandler &signalHandler)
+InverterMaster::InverterMaster(const InverterConfig &cfg,
+                               SignalHandler &signalHandler)
     : cfg_(cfg), inverter_(makeModbusConfig(cfg)), handler_(signalHandler) {
 
-  modbusLogger_ = spdlog::get("modbus");
+  modbusLogger_ = spdlog::get("inverter");
   if (!modbusLogger_)
     modbusLogger_ = spdlog::default_logger();
 
@@ -79,10 +80,10 @@ ModbusMaster::ModbusMaster(const ModbusRootConfig &cfg,
   inverter_.connect();
 
   // Start update loop thread
-  worker_ = std::thread(&ModbusMaster::runLoop, this);
+  worker_ = std::thread(&InverterMaster::runLoop, this);
 }
 
-ModbusMaster::~ModbusMaster() {
+InverterMaster::~InverterMaster() {
   connected_.store(false);
   if (availabilityCallback_) {
     availabilityCallback_(connected_.load() ? "connected" : "disconnected");
@@ -95,7 +96,7 @@ ModbusMaster::~ModbusMaster() {
   modbusLogger_->info("Inverter disconnected");
 }
 
-void ModbusMaster::runLoop() {
+void InverterMaster::runLoop() {
   while (handler_.isRunning()) {
 
     if (connected_.load()) {
@@ -148,69 +149,76 @@ void ModbusMaster::runLoop() {
   modbusLogger_->debug("Modbus master run loop stopped.");
 }
 
-void ModbusMaster::setValueCallback(std::function<void(std::string)> cb) {
+void InverterMaster::setValueCallback(std::function<void(std::string)> cb) {
   std::lock_guard<std::mutex> lock(cbMutex_);
   valueCallback_ = std::move(cb);
 }
 
-void ModbusMaster::setEventCallback(std::function<void(std::string)> cb) {
+void InverterMaster::setEventCallback(std::function<void(std::string)> cb) {
   std::lock_guard<std::mutex> lock(cbMutex_);
   eventCallback_ = std::move(cb);
 }
 
-void ModbusMaster::setDeviceCallback(std::function<void(std::string)> cb) {
+void InverterMaster::setDeviceCallback(std::function<void(std::string)> cb) {
   std::lock_guard<std::mutex> lock(cbMutex_);
   deviceCallback_ = std::move(cb);
 }
 
-void ModbusMaster::setAvailabilityCallback(
+void InverterMaster::setAvailabilityCallback(
     std::function<void(std::string)> cb) {
   std::lock_guard<std::mutex> lock(cbMutex_);
   availabilityCallback_ = std::move(cb);
 }
 
-std::string ModbusMaster::getJsonDump() const {
+std::string InverterMaster::getJsonDump() const {
   std::lock_guard<std::mutex> lock(cbMutex_);
   return jsonValues_.dump();
 }
 
-ModbusMaster::Values ModbusMaster::getValues() const {
+InverterTypes::Values InverterMaster::getValues() const {
   std::lock_guard<std::mutex> lock(cbMutex_);
   return values_;
 }
 
-Inverter ModbusMaster::makeModbusConfig(const ModbusRootConfig &cfg) {
+Inverter InverterMaster::makeModbusConfig(const InverterConfig &cfg) {
   ModbusConfig mcfg;
 
   if (cfg.tcp) {
-    mcfg.useTcp = true;
-    mcfg.host = cfg.tcp->host;
-    mcfg.port = cfg.tcp->port;
+    mcfg.transport = ModbusTcpTransport{
+        .host = cfg.tcp->host,
+        .port = cfg.tcp->port,
+    };
   } else if (cfg.rtu) {
-    mcfg.useTcp = false;
-    mcfg.device = cfg.rtu->device;
-    mcfg.baud = cfg.rtu->baud;
+    mcfg.transport = ModbusRtuTransport{
+        .device = cfg.rtu->device,
+        .baud = cfg.rtu->baud,
+        .dataBits = cfg.rtu->dataBits,
+        .stopBits = cfg.rtu->stopBits,
+        .parity = parityToChar(cfg.rtu->parity),
+    };
+  } else {
+    throw std::runtime_error("InverterMaster: no transport configured");
   }
 
   // Enable debug only if logger is at trace level
-  auto modbusLogger = spdlog::get("modbus");
+  auto modbusLogger = spdlog::get("inverter");
   mcfg.debug = modbusLogger && (modbusLogger->level() == spdlog::level::trace);
 
   mcfg.slaveId = cfg.slaveId;
 
   // Response timeout parameters
-  mcfg.secTimeout = cfg.responseTimeout->sec;
-  mcfg.usecTimeout = cfg.responseTimeout->usec;
+  mcfg.secTimeout = cfg.responseTimeout.sec;
+  mcfg.usecTimeout = cfg.responseTimeout.usec;
 
   // Reconnect parameters
-  mcfg.reconnectDelay = cfg.reconnectDelay->min;
-  mcfg.reconnectDelayMax = cfg.reconnectDelay->max;
-  mcfg.exponential = cfg.reconnectDelay->exponential;
+  mcfg.reconnectDelay = cfg.reconnectDelay.min;
+  mcfg.reconnectDelayMax = cfg.reconnectDelay.max;
+  mcfg.exponential = cfg.reconnectDelay.exponential;
 
   return Inverter(mcfg);
 }
 
-std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
+std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
   if (!handler_.isRunning()) {
     return std::unexpected(ModbusError::custom(
         EINTR, "updateValuesAndJson(): Shutdown in progress"));
@@ -221,7 +229,7 @@ std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
     return std::unexpected(regs.error());
   }
 
-  Values values{};
+  InverterTypes::Values values{};
 
   values.time = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch())
@@ -315,8 +323,8 @@ std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
 
   // ---- Phases ----
   json phases = json::array();
-  std::array<const Phase *, 3> phaseList = {&values.phase1, &values.phase2,
-                                            &values.phase3};
+  std::array<const InverterTypes::Phase *, 3> phaseList = {
+      &values.phase1, &values.phase2, &values.phase3};
 
   int phaseCount =
       std::clamp(inverter_.getPhases(), 1, static_cast<int>(phaseList.size()));
@@ -336,7 +344,8 @@ std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
 
   // ---- DC Inputs ----
   json inputs = json::array();
-  std::array<const Input *, 2> inputList = {&values.input1, &values.input2};
+  std::array<const InverterTypes::Input *, 2> inputList = {&values.input1,
+                                                           &values.input2};
 
   int inputCount =
       std::clamp(inverter_.getInputs(), 1, static_cast<int>(inputList.size()));
@@ -369,13 +378,13 @@ std::expected<void, ModbusError> ModbusMaster::updateValuesAndJson() {
   return {};
 }
 
-std::expected<void, ModbusError> ModbusMaster::updateEventsAndJson() {
+std::expected<void, ModbusError> InverterMaster::updateEventsAndJson() {
   if (!handler_.isRunning()) {
     return std::unexpected(ModbusError::custom(
         EINTR, "updateEventsAndJson(): Shutdown in progress"));
   }
 
-  Events newEvents;
+  InverterTypes::Events newEvents;
 
   try {
     newEvents.activeCode = inverter_.getActiveStateCode();
@@ -425,7 +434,7 @@ std::expected<void, ModbusError> ModbusMaster::updateEventsAndJson() {
   return {};
 }
 
-std::expected<void, ModbusError> ModbusMaster::updateDeviceAndJson() {
+std::expected<void, ModbusError> InverterMaster::updateDeviceAndJson() {
   if (!handler_.isRunning()) {
     return std::unexpected(ModbusError::custom(
         EINTR, "updateDeviceAndJson(): Shutdown in progress"));
@@ -434,7 +443,7 @@ std::expected<void, ModbusError> ModbusMaster::updateDeviceAndJson() {
   if (deviceUpdated_.load())
     return {};
 
-  Device newDevice;
+  InverterTypes::Device newDevice;
 
   try {
     newDevice.manufacturer =
