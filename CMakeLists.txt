@@ -112,7 +112,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
  
 target_link_libraries(${PROJECT_NAME} PRIVATE
-    yaml-cpp
+    yaml-cpp::yaml-cpp
     spdlog::spdlog
     nlohmann_json::nlohmann_json
     CLI11::CLI11

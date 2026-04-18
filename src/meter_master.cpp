@@ -52,6 +52,10 @@ MeterMaster::MeterMaster(const MeterMasterConfig &cfg,
         handler_.shutdown();
         break;
       }
+    } else {
+      modbusLogger_->warn("Meter validation failed: {}",
+                          mapResult.error().describe());
+      meter_.triggerReconnect();
     }
 
     if (availabilityCallback_)
