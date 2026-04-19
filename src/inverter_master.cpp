@@ -24,25 +24,21 @@ InverterMaster::InverterMaster(const InverterConfig &cfg,
     modbusLogger_ = spdlog::default_logger();
 
   // Inverter callbacks
-  inverter_.setConnectCallback([this]() {
+  inverter_.setConnectCallback([this](FroniusTypes::RegisterMap map) {
     if (cfg_.tcp) {
       auto remote = inverter_.getRemoteEndpoint();
-      modbusLogger_->info("Connected to Fronius inverter at {}:{}", remote.ip,
+      modbusLogger_->info("Inverter connected to {}:{}", remote.ip,
                           remote.port);
     } else {
-      modbusLogger_->info("Inverter connected successfully");
+      modbusLogger_->info("Inverter connected at {}", cfg_.rtu->device);
     }
+    modbusLogger_->debug("{} register map detected",
+                         FroniusTypes::toString(map));
 
-    auto valid = inverter_.validateDevice();
-    if (!valid) {
-      connected_.store(false);
-    } else {
-      modbusLogger_->info("The inverter is SunSpec v1.0 compatible");
-      connected_.store(true);
-    }
+    connected_.store(true);
 
     if (availabilityCallback_)
-      availabilityCallback_(connected_.load() ? "connected" : "disconnected");
+      availabilityCallback_("connected");
   });
 
   inverter_.setDisconnectCallback([this](int delay) {

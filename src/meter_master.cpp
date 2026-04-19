@@ -26,40 +26,20 @@ MeterMaster::MeterMaster(const MeterMasterConfig &cfg,
     modbusLogger_ = spdlog::default_logger();
 
   // Meter callbacks
-  meter_.setConnectCallback([this]() {
+  meter_.setConnectCallback([this](FroniusTypes::RegisterMap map) {
     if (cfg_.tcp) {
       auto remote = meter_.getRemoteEndpoint();
-      modbusLogger_->info("Connected to Fronius meter at {}:{}", remote.ip,
-                          remote.port);
+      modbusLogger_->info("Meter connected to {}:{}", remote.ip, remote.port);
     } else {
-      modbusLogger_->info("Meter connected successfully");
+      modbusLogger_->info("Meter connected at {}", cfg_.rtu->device);
     }
+    modbusLogger_->debug("{} register map detected",
+                         FroniusTypes::toString(map));
 
-    auto mapResult = meter_.validateDevice();
-    if (mapResult) {
-      switch (*mapResult) {
-      case FroniusTypes::RegisterMap::SUNSPEC:
-        modbusLogger_->info("The meter is SunSpec v1.0 compatible");
-        connected_.store(true);
-        break;
-      case FroniusTypes::RegisterMap::PROPRIETARY:
-        modbusLogger_->info("Meter uses proprietary Fronius register map");
-        connected_.store(true);
-        break;
-      case FroniusTypes::RegisterMap::UNAVAILABLE:
-        // validateDevice() never returns UNAVAILABLE as a success value
-        [[unlikely]];
-        handler_.shutdown();
-        break;
-      }
-    } else {
-      modbusLogger_->warn("Meter validation failed: {}",
-                          mapResult.error().describe());
-      meter_.triggerReconnect();
-    }
+    connected_.store(true);
 
     if (availabilityCallback_)
-      availabilityCallback_(connected_.load() ? "connected" : "disconnected");
+      availabilityCallback_("connected");
   });
 
   meter_.setDisconnectCallback([this](int delay) {
