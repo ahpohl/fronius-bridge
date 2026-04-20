@@ -13,13 +13,6 @@
 
 enum class Parity { None, Even, Odd };
 
-struct SerialParams {
-  int baud{9600};
-  int dataBits{8};
-  int stopBits{1};
-  Parity parity{Parity::None};
-};
-
 // ---------------------------------------------------------------------------
 // Conversion helpers (defined in config_yaml.cpp)
 // ---------------------------------------------------------------------------

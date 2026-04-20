@@ -194,10 +194,8 @@ template <typename T> static T parseModbusMaster(const YAML::Node &node) {
   cfg.tcp = parseTcpClient(node["tcp"]);
   cfg.rtu = parseRtu(node["rtu"]);
 
-  if (!cfg.tcp && !cfg.rtu)
-    throw std::runtime_error(": must specify tcp or rtu");
-  if (cfg.tcp && cfg.rtu)
-    cfg.rtu = std::nullopt;
+  if (cfg.tcp.has_value() == cfg.rtu.has_value())
+    throw std::runtime_error(": exactly one of tcp or rtu must be specified");
 
   cfg.slaveId = node["unit_id"].as<int>(1);
   cfg.updateInterval = node["update_interval"].as<int>(4);
@@ -236,10 +234,8 @@ static std::optional<MeterSlaveConfig> parseMeterSlave(const YAML::Node &node) {
   cfg.tcp = parseTcpServer(node["tcp"]);
   cfg.rtu = parseRtu(node["rtu"]);
 
-  if (!cfg.tcp && !cfg.rtu)
-    throw std::runtime_error(": must specify tcp or rtu");
-  if (cfg.tcp && cfg.rtu)
-    cfg.rtu = std::nullopt;
+  if (cfg.tcp.has_value() == cfg.rtu.has_value())
+    throw std::runtime_error(": exactly one of tcp or rtu must be specified");
 
   cfg.slaveId = node["unit_id"].as<int>(1);
   cfg.requestTimeout = node["request_timeout"].as<int>(5);
@@ -267,7 +263,11 @@ static std::optional<MeterConfig> parseMeter(const YAML::Node &node) {
   } catch (const std::exception &e) {
     throw std::runtime_error(std::string("meter.master") + e.what());
   }
-  cfg.slave = parseMeterSlave(node["slave"]);
+  try {
+    cfg.slave = parseMeterSlave(node["slave"]);
+  } catch (const std::exception &e) {
+    throw std::runtime_error(std::string("meter.slave") + e.what());
+  }
 
   return cfg;
 }

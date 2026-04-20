@@ -60,7 +60,7 @@ MeterMaster::MeterMaster(const MeterMasterConfig &cfg,
 
     } else if (err.severity == ModbusError::Severity::TRANSIENT) {
       // Temporary error - disconnect and reconnect
-      modbusLogger_->debug("Transient Modbus error: {}", err.describe());
+      modbusLogger_->warn("Transient Modbus error: {}", err.describe());
       connected_.store(false);
       meter_.triggerReconnect();
 
