@@ -61,6 +61,19 @@ int main(int argc, char *argv[]) {
     mainLogger = spdlog::default_logger();
   mainLogger->info("Starting {} with config '{}'", PROJECT_NAME, config);
 
+  // Warn if --user/--group specified but not running as root
+  if (!Privileges::isRoot() && !runUser.empty()) {
+    mainLogger->error(
+        "--user/--group options specified, but not running as root");
+    return EXIT_FAILURE;
+  }
+
+  // Warn if running as root without privilege drop
+  if (Privileges::isRoot() && runUser.empty()) {
+    mainLogger->warn("Running as root without privilege dropping - "
+                     "consider using --user/--group options");
+  }
+
   // --- Setup signals and shutdown
   SignalHandler handler;
 
