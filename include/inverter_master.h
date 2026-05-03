@@ -7,18 +7,23 @@
 #include <atomic>
 #include <condition_variable>
 #include <expected>
+#include <fronius/fronius_bus.h>
 #include <fronius/inverter.h>
+#include <fronius/modbus_config.h>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <spdlog/logger.h>
 #include <thread>
+#include <utility>
 
 class InverterMaster {
 public:
   explicit InverterMaster(const InverterConfig &cfg,
-                          SignalHandler &signalHandler);
+                          SignalHandler &signalHandler,
+                          std::shared_ptr<FroniusBus> bus);
   virtual ~InverterMaster();
 
   std::string getJsonDump(void) const;
@@ -33,14 +38,18 @@ public:
   void setDeviceCallback(std::function<void(std::string)> cb);
   void setAvailabilityCallback(std::function<void(std::string)> cb);
 
+  static ModbusBusConfig makeBusConfig(const InverterConfig &cfg);
+
 private:
+  static ModbusDeviceConfig makeDeviceConfig(const InverterConfig &cfg);
   void runLoop();
-  Inverter makeModbusConfig(const InverterConfig &cfg);
-  Inverter inverter_;
+
+  std::shared_ptr<FroniusBus> bus_;
+  std::shared_ptr<Inverter> inverter_;
   const InverterConfig &cfg_;
   std::shared_ptr<spdlog::logger> modbusLogger_;
 
-  // --- values and events
+  // --- values and events ---
   InverterTypes::Device device_;
   InverterTypes::Values values_;
   InverterTypes::Events events_;

@@ -21,8 +21,8 @@ inline void setupLogging(const LoggerConfig &cfg) {
     spdlog::register_logger(logger);
   }
 
-  // simple pattern
-  spdlog::set_pattern("[%n] [%^%l%$] %v");
+  // simple pattern with millisecond timestamps
+  spdlog::set_pattern("[%H:%M:%S.%e] [%n] [%^%l%$] %v");
 }
 
 #endif /* LOGGER_H_ */

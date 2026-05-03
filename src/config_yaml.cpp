@@ -344,27 +344,31 @@ static LoggerConfig parseLogger(const YAML::Node &node) {
 // ---------------------------------------------------------------------------
 
 static void validateConfig(const AppConfig &cfg) {
+  // RTU device conflict: master and slave cannot share the same serial device
   if (cfg.meter && cfg.meter->slave) {
     const MeterMasterConfig &master = cfg.meter->master;
     const MeterSlaveConfig &slave = *cfg.meter->slave;
 
-    // RTU device conflict: master and slave cannot share the same serial device
     if (master.rtu && slave.rtu && master.rtu->device == slave.rtu->device) {
       throw std::runtime_error(
           "meter.master and meter.slave cannot share the same RTU device");
     }
   }
 
-  if (cfg.meter && cfg.inverter) {
-    const MeterMasterConfig &meter = cfg.meter->master;
-    const InverterConfig &inverter = *cfg.inverter;
-
-    // RTU device conflict: inverter and meter master cannot share the same
-    // device until a shared bus has been implemented
-    if (inverter.rtu && meter.rtu &&
-        inverter.rtu->device == meter.rtu->device) {
-      throw std::runtime_error(
-          "meter.master and inverter cannot share the same RTU device");
+  // RTU parameter conflict: inverter and meter.master may share a device
+  // path but must agree on all line parameters.
+  if (cfg.inverter && cfg.inverter->rtu && cfg.meter && cfg.meter->master.rtu &&
+      cfg.inverter->rtu->device == cfg.meter->master.rtu->device) {
+    const auto &ir = *cfg.inverter->rtu;
+    const auto &mr = *cfg.meter->master.rtu;
+    if (ir.baud != mr.baud || ir.dataBits != mr.dataBits ||
+        ir.stopBits != mr.stopBits || ir.parity != mr.parity) {
+      throw std::runtime_error(std::format(
+          "inverter and meter.master share RTU device '{}' but have "
+          "conflicting parameters: "
+          "inverter={} baud/{}-{}-{} vs meter={} baud/{}-{}-{}",
+          ir.device, ir.baud, ir.dataBits, parityToChar(ir.parity), ir.stopBits,
+          mr.baud, mr.dataBits, parityToChar(mr.parity), mr.stopBits));
     }
   }
 }

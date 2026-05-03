@@ -140,18 +140,15 @@ MeterSlave::handleResult(std::expected<void, ModbusError> &&result) {
   const ModbusError &err = result.error();
 
   if (err.severity == ModbusError::Severity::FATAL) {
-    // Fatal error occurred - initiate shutdown sequence
     modbusLogger_->error("FATAL Modbus error: {}", err.describe());
     handler_.shutdown();
     return MeterTypes::ErrorAction::SHUTDOWN;
 
   } else if (err.severity == ModbusError::Severity::TRANSIENT) {
-    // Temporary error - disconnect and reconnect
     modbusLogger_->warn("Transient Modbus error: {}", err.describe());
     return MeterTypes::ErrorAction::RECONNECT;
 
   } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
-    // Shutdown already in progress - just exit cleanly
     modbusLogger_->trace("Modbus operation cancelled due to shutdown: {}",
                          err.describe());
     return MeterTypes::ErrorAction::SHUTDOWN;
@@ -222,7 +219,6 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
       values.phase3.powerFactor);
 
   if (cfg_.useFloatModel) {
-    // power factor
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::PF,
                                                   values.powerFactor));
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::PFPHA,
@@ -232,7 +228,6 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::PFPHC,
                                                   values.phase3.powerFactor));
 
-    // active power
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::W,
                                                   values.activePower));
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::WPHA,
@@ -242,7 +237,6 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::WPHC,
                                                   values.phase3.activePower));
 
-    // apparent power
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::VA,
                                                   values.apparentPower));
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::VAPHA,
@@ -252,7 +246,6 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::VAPHC,
                                                   values.phase3.apparentPower));
 
-    // reactive power
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::VAR,
                                                   values.reactivePower));
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::VARPHA,
@@ -262,7 +255,6 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::VARPHC,
                                                   values.phase3.reactivePower));
 
-    // phase-to-neutral voltage
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::PHV,
                                                   values.phVoltage));
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::PHVPHA,
@@ -272,7 +264,6 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::PHVPHC,
                                                   values.phase3.phVoltage));
 
-    // phase-to-phase voltage
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::PPV,
                                                   values.ppVoltage));
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::PPVPHAB,
@@ -282,7 +273,6 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::PPVPHCA,
                                                   values.phase3.ppVoltage));
 
-    // current
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::A,
                                                   values.current));
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::APHA,
@@ -292,7 +282,6 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::APHC,
                                                   values.phase3.current));
 
-    // energy
     handleResult(ModbusUtils::packToModbus<float>(
         newRegs.get(), M21X::TOT_WH_IMP, values.activeEnergyImport));
     handleResult(ModbusUtils::packToModbus<float>(
@@ -302,12 +291,10 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
     handleResult(ModbusUtils::packToModbus<float>(
         newRegs.get(), M21X::TOT_VAH_EXP, values.apparentEnergyExport));
 
-    // frequency
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::FREQ,
                                                   values.frequency));
 
   } else {
-    // power factor
     handleResult(ModbusUtils::packToModbus(newRegs.get(), M20X::PF, M20X::PF_SF,
                                            values.powerFactor, 1));
     handleResult(ModbusUtils::packToModbus(
@@ -317,7 +304,6 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
     handleResult(ModbusUtils::packToModbus(
         newRegs.get(), M20X::PFPHC, M20X::PF_SF, values.phase3.powerFactor, 1));
 
-    // active power
     handleResult(ModbusUtils::packToModbus(newRegs.get(), M20X::W, M20X::W_SF,
                                            values.activePower, 0));
     handleResult(ModbusUtils::packToModbus(
@@ -327,7 +313,6 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
     handleResult(ModbusUtils::packToModbus(
         newRegs.get(), M20X::WPHC, M20X::W_SF, values.phase3.activePower, 0));
 
-    // apparent power
     handleResult(ModbusUtils::packToModbus(newRegs.get(), M20X::VA, M20X::VA_SF,
                                            values.apparentPower, 0));
     handleResult(ModbusUtils::packToModbus(newRegs.get(), M20X::VAPHA,
@@ -340,7 +325,6 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
                                            M20X::VA_SF,
                                            values.phase3.apparentPower, 0));
 
-    // reactive power
     handleResult(ModbusUtils::packToModbus(
         newRegs.get(), M20X::VAR, M20X::VAR_SF, values.reactivePower, 0));
     handleResult(ModbusUtils::packToModbus(newRegs.get(), M20X::VARPHA,
@@ -353,7 +337,6 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
                                            M20X::VAR_SF,
                                            values.phase3.reactivePower, 0));
 
-    // phase-to-netral voltage
     handleResult(ModbusUtils::packToModbus(newRegs.get(), M20X::PHV, M20X::V_SF,
                                            values.phVoltage, 1));
     handleResult(ModbusUtils::packToModbus(
@@ -363,7 +346,6 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
     handleResult(ModbusUtils::packToModbus(
         newRegs.get(), M20X::PHVPHC, M20X::V_SF, values.phase3.phVoltage, 1));
 
-    // phase-to-phase voltage
     handleResult(ModbusUtils::packToModbus(newRegs.get(), M20X::PPV, M20X::V_SF,
                                            values.ppVoltage, 1));
     handleResult(ModbusUtils::packToModbus(
@@ -373,7 +355,6 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
     handleResult(ModbusUtils::packToModbus(
         newRegs.get(), M20X::PPVPHCA, M20X::V_SF, values.phase3.ppVoltage, 1));
 
-    // current
     handleResult(ModbusUtils::packToModbus(newRegs.get(), M20X::A, M20X::A_SF,
                                            values.current, 3));
     handleResult(ModbusUtils::packToModbus(
@@ -383,7 +364,6 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
     handleResult(ModbusUtils::packToModbus(
         newRegs.get(), M20X::APHC, M20X::A_SF, values.phase3.current, 3));
 
-    // energy
     handleResult(ModbusUtils::packToModbus(newRegs.get(), M20X::TOT_WH_IMP,
                                            M20X::TOT_WH_SF,
                                            values.activeEnergyImport, 0));
@@ -397,7 +377,6 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
                                            M20X::TOT_VAH_SF,
                                            values.apparentEnergyExport, 0));
 
-    // frequency
     handleResult(ModbusUtils::packToModbus(newRegs.get(), M20X::FREQ,
                                            M20X::FREQ_SF, values.frequency, 1));
   }
@@ -651,7 +630,6 @@ void MeterSlave::rtuClientHandler() {
 
 void MeterSlave::tcpClientHandler(void) {
 
-  // TCP mode - accept connections and spawn client threads
   if (serverSocket_ == -1) {
     auto socketAction = handleResult(std::unexpected(ModbusError::custom(
         EBADF, "tcpClientHandler(): server socket is invalid, cannot start")));

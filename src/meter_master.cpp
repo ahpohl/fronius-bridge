@@ -6,8 +6,8 @@
 #include <chrono>
 #include <cmath>
 #include <expected>
+#include <fronius/fronius_bus.h>
 #include <fronius/fronius_types.h>
-#include <fronius/inverter.h>
 #include <fronius/modbus_config.h>
 #include <fronius/modbus_error.h>
 #include <functional>
@@ -18,62 +18,86 @@
 using json = nlohmann::ordered_json;
 
 MeterMaster::MeterMaster(const MeterMasterConfig &cfg,
-                         SignalHandler &signalHandler)
-    : cfg_(cfg), meter_(makeModbusConfig(cfg)), handler_(signalHandler) {
+                         SignalHandler &signalHandler,
+                         std::shared_ptr<FroniusBus> bus)
+    : cfg_(cfg), handler_(signalHandler), bus_(std::move(bus)) {
 
   modbusLogger_ = spdlog::get("meter.master");
   if (!modbusLogger_)
     modbusLogger_ = spdlog::default_logger();
 
-  // Meter callbacks
-  meter_.setConnectCallback([this](FroniusTypes::RegisterMap map) {
+  auto devCfg = makeDeviceConfig(cfg);
+  meter_ = std::make_shared<Meter>(bus_, devCfg);
+  bus_->registerDevice(meter_);
+
+  // --- Bus-level callbacks ---
+
+  bus_->addBusConnectCallback([this] {
     if (cfg_.tcp) {
-      auto remote = meter_.getRemoteEndpoint();
+      auto remote = bus_->getRemoteEndpoint();
       modbusLogger_->info("Meter connected to {}:{}", remote.ip, remote.port);
     } else {
       modbusLogger_->info("Meter connected at {}", cfg_.rtu->device);
     }
+  });
+
+  bus_->addBusDisconnectCallback([this](int delay) {
+    modbusLogger_->warn("Meter disconnected, trying to reconnect in {} {}...",
+                        delay, delay == 1 ? "second" : "seconds");
+  });
+
+  bus_->addBusErrorCallback([this](const ModbusError &err) {
+    if (err.severity == ModbusError::Severity::FATAL) {
+      modbusLogger_->error("FATAL Modbus bus error: {}", err.describe());
+      handler_.shutdown();
+    } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
+      modbusLogger_->trace("Modbus bus operation cancelled due to shutdown: {}",
+                           err.describe());
+    }
+  });
+
+  // --- Device-level callbacks ---
+
+  meter_->setDeviceReadyCallback([this](FroniusTypes::RegisterMap map) {
     modbusLogger_->debug("{} register map detected",
                          FroniusTypes::toString(map));
-
     connected_.store(true);
 
     if (availabilityCallback_)
       availabilityCallback_("connected");
   });
 
-  meter_.setDisconnectCallback([this](int delay) {
-    modbusLogger_->warn("Meter disconnected, trying to reconnect in {} {}...",
-                        delay, delay == 1 ? "second" : "seconds");
-
-    connected_.store(false); // Explicit state update
+  meter_->setDeviceUnavailableCallback([this] {
+    connected_.store(false);
 
     if (availabilityCallback_)
-      availabilityCallback_(connected_.load() ? "connected" : "disconnected");
+      availabilityCallback_("disconnected");
   });
 
-  meter_.setErrorCallback([this](const ModbusError &err) {
+  meter_->setDeviceErrorCallback([this](const ModbusError &err) {
     if (err.severity == ModbusError::Severity::FATAL) {
-      // Fatal error occurred - initiate shutdown sequence
       modbusLogger_->error("FATAL Modbus error: {}", err.describe());
       handler_.shutdown();
 
     } else if (err.severity == ModbusError::Severity::TRANSIENT) {
-      // Temporary error - disconnect and reconnect
-      modbusLogger_->warn("Transient Modbus error: {}", err.describe());
+      modbusLogger_->debug("Transient Modbus error: {}", err.describe());
       connected_.store(false);
-      meter_.triggerReconnect();
+      bus_->scheduleDeviceRetry(meter_);
 
     } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
-      // Shutdown already in progress - just exit cleanly
       modbusLogger_->trace("Modbus operation cancelled due to shutdown: {}",
                            err.describe());
       connected_.store(false);
     }
   });
 
-  // Start inverter connect loop
-  meter_.connect();
+  meter_->setDeviceRetryCallback([this](int delay) {
+    modbusLogger_->warn("Meter unavailable, retrying in {} {}...", delay,
+                        delay == 1 ? "second" : "seconds");
+  });
+
+  // Start bus connect loop
+  bus_->connect();
 
   // Start update loop thread
   worker_ = std::thread(&MeterMaster::runLoop, this);
@@ -165,16 +189,16 @@ MeterTypes::Values MeterMaster::getValues() const {
   return values_;
 }
 
-Meter MeterMaster::makeModbusConfig(const MeterMasterConfig &cfg) {
-  ModbusConfig mcfg;
+ModbusBusConfig MeterMaster::makeBusConfig(const MeterMasterConfig &cfg) {
+  ModbusBusConfig busCfg;
 
   if (cfg.tcp) {
-    mcfg.transport = ModbusTcpTransport{
+    busCfg.transport = ModbusTcpTransport{
         .host = cfg.tcp->host,
         .port = cfg.tcp->port,
     };
   } else if (cfg.rtu) {
-    mcfg.transport = ModbusRtuTransport{
+    busCfg.transport = ModbusRtuTransport{
         .device = cfg.rtu->device,
         .baud = cfg.rtu->baud,
         .dataBits = cfg.rtu->dataBits,
@@ -185,22 +209,26 @@ Meter MeterMaster::makeModbusConfig(const MeterMasterConfig &cfg) {
     throw std::runtime_error("MeterMaster: no transport configured");
   }
 
-  // Enable debug only if logger is at trace level
-  auto modbusLogger = spdlog::get("meter.master");
-  mcfg.debug = modbusLogger && (modbusLogger->level() == spdlog::level::trace);
+  // Enable debug only if main logger is at trace level
+  auto mainLogger = spdlog::get("main");
+  busCfg.debug = mainLogger && (mainLogger->level() == spdlog::level::trace);
 
-  mcfg.slaveId = cfg.slaveId;
+  busCfg.reconnectDelay = cfg.reconnectDelay.min;
+  busCfg.reconnectDelayMax = cfg.reconnectDelay.max;
+  busCfg.exponential = cfg.reconnectDelay.exponential;
 
-  // Response timeout parameters
-  mcfg.secTimeout = cfg.responseTimeout.sec;
-  mcfg.usecTimeout = cfg.responseTimeout.usec;
+  return busCfg;
+}
 
-  // Reconnect parameters
-  mcfg.reconnectDelay = cfg.reconnectDelay.min;
-  mcfg.reconnectDelayMax = cfg.reconnectDelay.max;
-  mcfg.exponential = cfg.reconnectDelay.exponential;
-
-  return Meter(mcfg);
+ModbusDeviceConfig MeterMaster::makeDeviceConfig(const MeterMasterConfig &cfg) {
+  ModbusDeviceConfig devCfg;
+  devCfg.slaveId = cfg.slaveId;
+  devCfg.secTimeout = cfg.responseTimeout.sec;
+  devCfg.usecTimeout = cfg.responseTimeout.usec;
+  devCfg.reconnectDelay = cfg.reconnectDelay.min;
+  devCfg.reconnectDelayMax = cfg.reconnectDelay.max;
+  devCfg.exponential = cfg.reconnectDelay.exponential;
+  return devCfg;
 }
 
 std::expected<void, ModbusError> MeterMaster::updateValuesAndJson() {
@@ -209,7 +237,7 @@ std::expected<void, ModbusError> MeterMaster::updateValuesAndJson() {
         EINTR, "updateValuesAndJson(): Shutdown in progress"));
   }
 
-  auto regs = meter_.fetchMeterRegisters();
+  auto regs = meter_->fetchMeterRegisters();
   if (!regs) {
     return std::unexpected(regs.error());
   }
@@ -221,107 +249,101 @@ std::expected<void, ModbusError> MeterMaster::updateValuesAndJson() {
                     .count();
 
   try {
-    // energy
     values.activeEnergyImport = ModbusError::getOrThrow(
-        meter_.getAcEnergyActive(FroniusTypes::EnergyDirection::IMPORT));
+        meter_->getAcEnergyActive(FroniusTypes::EnergyDirection::IMPORT));
     values.activeEnergyExport = ModbusError::getOrThrow(
-        meter_.getAcEnergyActive(FroniusTypes::EnergyDirection::EXPORT));
+        meter_->getAcEnergyActive(FroniusTypes::EnergyDirection::EXPORT));
 
-    // active power
     values.activePower = ModbusError::getOrThrow(
-        meter_.getAcPowerActive(FroniusTypes::Phase::TOTAL));
+        meter_->getAcPowerActive(FroniusTypes::Phase::TOTAL));
 
-    // apparent power
     values.apparentPower = ModbusError::getOrThrow(
-        meter_.getAcPowerApparent(FroniusTypes::Phase::TOTAL));
+        meter_->getAcPowerApparent(FroniusTypes::Phase::TOTAL));
 
-    // reactive power
     values.reactivePower = ModbusError::getOrThrow(
-        meter_.getAcPowerReactive(FroniusTypes::Phase::TOTAL));
+        meter_->getAcPowerReactive(FroniusTypes::Phase::TOTAL));
 
-    // power factor
     values.powerFactor = ModbusError::getOrThrow(
-        meter_.getAcPowerFactor(FroniusTypes::Phase::AVERAGE));
+        meter_->getAcPowerFactor(FroniusTypes::Phase::AVERAGE));
 
-    // voltages
     values.phVoltage =
-        ModbusError::getOrThrow(meter_.getAcVoltage(FroniusTypes::Phase::PHV));
+        ModbusError::getOrThrow(meter_->getAcVoltage(FroniusTypes::Phase::PHV));
     values.ppVoltage =
-        ModbusError::getOrThrow(meter_.getAcVoltage(FroniusTypes::Phase::PPV));
+        ModbusError::getOrThrow(meter_->getAcVoltage(FroniusTypes::Phase::PPV));
 
-    // frequency
-    values.frequency = ModbusError::getOrThrow(meter_.getAcFrequency());
+    values.frequency = ModbusError::getOrThrow(meter_->getAcFrequency());
 
     // --- Per-phase (1 phase) ---
     values.phase1.activePower = ModbusError::getOrThrow(
-        meter_.getAcPowerActive(FroniusTypes::Phase::A));
+        meter_->getAcPowerActive(FroniusTypes::Phase::A));
     values.phase1.apparentPower = ModbusError::getOrThrow(
-        meter_.getAcPowerApparent(FroniusTypes::Phase::A));
+        meter_->getAcPowerApparent(FroniusTypes::Phase::A));
     values.phase1.reactivePower = ModbusError::getOrThrow(
-        meter_.getAcPowerReactive(FroniusTypes::Phase::A));
+        meter_->getAcPowerReactive(FroniusTypes::Phase::A));
     values.phase1.powerFactor = ModbusError::getOrThrow(
-        meter_.getAcPowerFactor(FroniusTypes::Phase::A));
+        meter_->getAcPowerFactor(FroniusTypes::Phase::A));
     values.phase1.phVoltage =
-        ModbusError::getOrThrow(meter_.getAcVoltage(FroniusTypes::Phase::A));
+        ModbusError::getOrThrow(meter_->getAcVoltage(FroniusTypes::Phase::A));
     values.phase1.ppVoltage =
-        ModbusError::getOrThrow(meter_.getAcVoltage(FroniusTypes::Phase::AB));
+        ModbusError::getOrThrow(meter_->getAcVoltage(FroniusTypes::Phase::AB));
     values.phase1.current =
-        ModbusError::getOrThrow(meter_.getAcCurrent(FroniusTypes::Phase::A));
+        ModbusError::getOrThrow(meter_->getAcCurrent(FroniusTypes::Phase::A));
 
     // --- Per-phase (2 phases) ---
-    if (meter_.getPhases() > 1) {
+    if (meter_->getPhases() > 1) {
       values.phase2.activePower = ModbusError::getOrThrow(
-          meter_.getAcPowerActive(FroniusTypes::Phase::B));
+          meter_->getAcPowerActive(FroniusTypes::Phase::B));
       values.phase2.apparentPower = ModbusError::getOrThrow(
-          meter_.getAcPowerApparent(FroniusTypes::Phase::B));
+          meter_->getAcPowerApparent(FroniusTypes::Phase::B));
       values.phase2.reactivePower = ModbusError::getOrThrow(
-          meter_.getAcPowerReactive(FroniusTypes::Phase::B));
+          meter_->getAcPowerReactive(FroniusTypes::Phase::B));
       values.phase2.powerFactor = ModbusError::getOrThrow(
-          meter_.getAcPowerFactor(FroniusTypes::Phase::B));
+          meter_->getAcPowerFactor(FroniusTypes::Phase::B));
       values.phase2.phVoltage =
-          ModbusError::getOrThrow(meter_.getAcVoltage(FroniusTypes::Phase::B));
-      values.phase2.ppVoltage =
-          ModbusError::getOrThrow(meter_.getAcVoltage(FroniusTypes::Phase::BC));
+          ModbusError::getOrThrow(meter_->getAcVoltage(FroniusTypes::Phase::B));
+      values.phase2.ppVoltage = ModbusError::getOrThrow(
+          meter_->getAcVoltage(FroniusTypes::Phase::BC));
       values.phase2.current =
-          ModbusError::getOrThrow(meter_.getAcCurrent(FroniusTypes::Phase::B));
+          ModbusError::getOrThrow(meter_->getAcCurrent(FroniusTypes::Phase::B));
     }
 
     // --- Per-phase (3 phases) ---
-    if (meter_.getPhases() > 2) {
+    if (meter_->getPhases() > 2) {
       values.phase3.activePower = ModbusError::getOrThrow(
-          meter_.getAcPowerActive(FroniusTypes::Phase::C));
+          meter_->getAcPowerActive(FroniusTypes::Phase::C));
       values.phase3.apparentPower = ModbusError::getOrThrow(
-          meter_.getAcPowerApparent(FroniusTypes::Phase::C));
+          meter_->getAcPowerApparent(FroniusTypes::Phase::C));
       values.phase3.reactivePower = ModbusError::getOrThrow(
-          meter_.getAcPowerReactive(FroniusTypes::Phase::C));
+          meter_->getAcPowerReactive(FroniusTypes::Phase::C));
       values.phase3.powerFactor = ModbusError::getOrThrow(
-          meter_.getAcPowerFactor(FroniusTypes::Phase::C));
+          meter_->getAcPowerFactor(FroniusTypes::Phase::C));
       values.phase3.phVoltage =
-          ModbusError::getOrThrow(meter_.getAcVoltage(FroniusTypes::Phase::C));
-      values.phase3.ppVoltage =
-          ModbusError::getOrThrow(meter_.getAcVoltage(FroniusTypes::Phase::CA));
+          ModbusError::getOrThrow(meter_->getAcVoltage(FroniusTypes::Phase::C));
+      values.phase3.ppVoltage = ModbusError::getOrThrow(
+          meter_->getAcVoltage(FroniusTypes::Phase::CA));
       values.phase3.current =
-          ModbusError::getOrThrow(meter_.getAcCurrent(FroniusTypes::Phase::C));
+          ModbusError::getOrThrow(meter_->getAcCurrent(FroniusTypes::Phase::C));
     }
 
-    // current (uses sum of phase values for proprietary map)
-    if (meter_.getRegisterMap() == FroniusTypes::RegisterMap::PROPRIETARY) {
+    // Proprietary register map exposes only per-phase current; sum them.
+    if (meter_->getRegisterMap() == FroniusTypes::RegisterMap::PROPRIETARY) {
       values.current =
           values.phase1.current + values.phase2.current + values.phase3.current;
     } else {
       values.current = ModbusError::getOrThrow(
-          meter_.getAcCurrent(FroniusTypes::Phase::TOTAL));
+          meter_->getAcCurrent(FroniusTypes::Phase::TOTAL));
     }
 
-    // derived energy values — depends on what the register map provides
-    if (meter_.getRegisterMap() == FroniusTypes::RegisterMap::SUNSPEC) {
+    // Energy: each register map exposes only two of the three energy types
+    // directly; derive the third from the other two.
+    if (meter_->getRegisterMap() == FroniusTypes::RegisterMap::SUNSPEC) {
       values.apparentEnergyImport = ModbusError::getOrThrow(
-          meter_.getAcEnergyApparent(FroniusTypes::EnergyDirection::IMPORT));
+          meter_->getAcEnergyApparent(FroniusTypes::EnergyDirection::IMPORT));
       values.apparentEnergyExport = ModbusError::getOrThrow(
-          meter_.getAcEnergyApparent(FroniusTypes::EnergyDirection::EXPORT));
+          meter_->getAcEnergyApparent(FroniusTypes::EnergyDirection::EXPORT));
 
-      // derive reactive from apparent and active, signed by reactive power
-      // direction
+      // Derive reactive from apparent and active, signed by reactive power
+      // direction.
       const double sign = values.reactivePower >= 0.0 ? 1.0 : -1.0;
       values.reactiveEnergyImport =
           sign *
@@ -332,14 +354,14 @@ std::expected<void, ModbusError> MeterMaster::updateValuesAndJson() {
           std::sqrt(values.apparentEnergyExport * values.apparentEnergyExport -
                     values.activeEnergyExport * values.activeEnergyExport);
 
-    } else if (meter_.getRegisterMap() ==
+    } else if (meter_->getRegisterMap() ==
                FroniusTypes::RegisterMap::PROPRIETARY) {
       values.reactiveEnergyImport = ModbusError::getOrThrow(
-          meter_.getAcEnergyReactive(FroniusTypes::EnergyDirection::IMPORT));
+          meter_->getAcEnergyReactive(FroniusTypes::EnergyDirection::IMPORT));
       values.reactiveEnergyExport = ModbusError::getOrThrow(
-          meter_.getAcEnergyReactive(FroniusTypes::EnergyDirection::EXPORT));
+          meter_->getAcEnergyReactive(FroniusTypes::EnergyDirection::EXPORT));
 
-      // derive apparent from active and reactive
+      // Derive apparent from active and reactive.
       values.apparentEnergyImport =
           std::hypot(values.activeEnergyImport, values.reactiveEnergyImport);
       values.apparentEnergyExport =
@@ -367,7 +389,7 @@ std::expected<void, ModbusError> MeterMaster::updateValuesAndJson() {
 
   });
 
-  if (meter_.getPhases() > 1) {
+  if (meter_->getPhases() > 1) {
     phases.push_back({
         {"id", 2},
         {"power_active", JsonUtils::roundTo(values.phase2.activePower, 0)},
@@ -381,7 +403,7 @@ std::expected<void, ModbusError> MeterMaster::updateValuesAndJson() {
     });
   }
 
-  if (meter_.getPhases() > 2) {
+  if (meter_->getPhases() > 2) {
     phases.push_back({
         {"id", 3},
         {"power_active", JsonUtils::roundTo(values.phase3.activePower, 0)},
@@ -417,7 +439,6 @@ std::expected<void, ModbusError> MeterMaster::updateValuesAndJson() {
   newJson["current"] = JsonUtils::roundTo(values.current, 3);
   newJson["phases"] = phases;
 
-  // Update shared values and JSON with lock
   {
     std::lock_guard<std::mutex> lock(cbMutex_);
     values_ = std::move(values);
@@ -441,23 +462,22 @@ std::expected<void, ModbusError> MeterMaster::updateDeviceAndJson() {
   MeterTypes::Device newDevice;
 
   try {
-    newDevice.manufacturer = ModbusError::getOrThrow(meter_.getManufacturer());
-    newDevice.model = ModbusError::getOrThrow(meter_.getDeviceModel());
-    newDevice.serialNumber = ModbusError::getOrThrow(meter_.getSerialNumber());
-    newDevice.fwVersion = ModbusError::getOrThrow(meter_.getFwVersion());
+    newDevice.manufacturer = ModbusError::getOrThrow(meter_->getManufacturer());
+    newDevice.model = ModbusError::getOrThrow(meter_->getDeviceModel());
+    newDevice.serialNumber = ModbusError::getOrThrow(meter_->getSerialNumber());
+    newDevice.fwVersion = ModbusError::getOrThrow(meter_->getFwVersion());
     newDevice.options = std::string(PROJECT_VERSION) + "-" + GIT_COMMIT_HASH;
-    newDevice.dataManagerVersion = ModbusError::getOrThrow(meter_.getOptions());
     newDevice.registerModel =
-        meter_.getUseFloatRegisters() ? "float" : "int+sf";
+        meter_->getUseFloatRegisters() ? "float" : "int+sf";
     newDevice.slaveID =
-        ModbusError::getOrThrow(meter_.getModbusDeviceAddress());
+        ModbusError::getOrThrow(meter_->getModbusDeviceAddress());
   } catch (const ModbusError &err) {
     modbusLogger_->warn("{}", err.message);
     return std::unexpected(err);
   }
 
-  newDevice.id = meter_.getId();
-  newDevice.phases = meter_.getPhases();
+  newDevice.id = meter_->getId();
+  newDevice.phases = meter_->getPhases();
 
   // Compare received slave ID with configured
   if (cfg_.slaveId != newDevice.slaveID) {
@@ -472,7 +492,6 @@ std::expected<void, ModbusError> MeterMaster::updateDeviceAndJson() {
   newJson["model"] = newDevice.model;
   newJson["serial_number"] = newDevice.serialNumber;
   newJson["firmware_version"] = newDevice.fwVersion;
-  newJson["data_manager"] = newDevice.dataManagerVersion;
   newJson["register_model"] = newDevice.registerModel;
   newJson["slave_id"] = newDevice.slaveID;
   newJson["meter_id"] = newDevice.id;

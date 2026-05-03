@@ -93,16 +93,15 @@ void MqttClient::publish(std::string payload, const std::string &topic) {
     return;
   lastPayloadHashes_[topic] = payloadHash;
 
-  // Per-topic queue reference
   auto &q = topicQueues_[topic];
 
   // If topic queue is full, drop oldest for that topic
-  if (q.size() >= cfg_.queueSize) { // can be per-topic limit if you add one
-    q.pop();                        // remove oldest for this topic
-    droppedCount_[topic]++;         // track total drops for this topic
+  if (q.size() >= cfg_.queueSize) {
+    q.pop();
+    droppedCount_[topic]++;
   }
 
-  q.push({payload}); // push new message
+  q.push({payload});
 
   // Logging only if disconnected
   if (!connected_.load()) {

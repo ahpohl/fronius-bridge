@@ -7,25 +7,28 @@
 #include <atomic>
 #include <condition_variable>
 #include <expected>
+#include <fronius/fronius_bus.h>
 #include <fronius/meter.h>
+#include <fronius/modbus_config.h>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <spdlog/logger.h>
 #include <thread>
+#include <utility>
 
 class MeterMaster {
 public:
   explicit MeterMaster(const MeterMasterConfig &cfg,
-                       SignalHandler &signalHandler);
+                       SignalHandler &signalHandler,
+                       std::shared_ptr<FroniusBus> bus);
   virtual ~MeterMaster();
 
   std::string getJsonDump(void) const;
   MeterTypes::Values getValues(void) const;
 
   std::expected<void, ModbusError> updateValuesAndJson(void);
-  std::expected<void, ModbusError> updateEventsAndJson(void);
   std::expected<void, ModbusError> updateDeviceAndJson(void);
 
   void
@@ -34,20 +37,22 @@ public:
   setDeviceCallback(std::function<void(std::string, MeterTypes::Device)> cb);
   void setAvailabilityCallback(std::function<void(std::string)> cb);
 
+  static ModbusBusConfig makeBusConfig(const MeterMasterConfig &cfg);
+
 private:
+  static ModbusDeviceConfig makeDeviceConfig(const MeterMasterConfig &cfg);
   void runLoop();
-  Meter makeModbusConfig(const MeterMasterConfig &cfg);
-  Meter meter_;
+
+  std::shared_ptr<FroniusBus> bus_;
+  std::shared_ptr<Meter> meter_;
   const MeterMasterConfig &cfg_;
   std::shared_ptr<spdlog::logger> modbusLogger_;
 
-  // --- values and events
+  // --- values and device info ---
   MeterTypes::Device device_;
   MeterTypes::Values values_;
   nlohmann::ordered_json jsonValues_;
-  nlohmann::ordered_json jsonEvents_;
   nlohmann::json jsonDevice_;
-  std::optional<std::size_t> lastEventsHash_;
 
   // --- threading / callbacks ---
   std::function<void(std::string, MeterTypes::Values)> valueCallback_;

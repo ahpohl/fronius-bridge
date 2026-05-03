@@ -28,7 +28,6 @@ The `inverter` and `meter` sections are both optional — at least one must be c
 - Battery/storage data is detected but not yet supported.
 - A PostgreSQL consumer is planned but not implemented yet.
 - TLS in libmosquitto not yet supported.
-- Shared RTU bus (inverter and meter master on the same serial port) is planned but not yet supported.
 
 ## Dependencies
 
@@ -109,10 +108,10 @@ logger:
 
 **Transport fields** (shared by `inverter`, `meter.master`, and `meter.slave`):
 
-- tcp / rtu: Configure at least one transport per section. TCP takes precedence if both are present.
-  - tcp.host: Hostname or IP (IPv4/IPv6) of the remote device.
-  - tcp.port: Modbus TCP port (default: 502).
-  - tcp.listen: Bind address for slave mode. Use `0.0.0.0` for all IPv4 interfaces (default).
+- tcp / rtu: Configure exactly one transport per section.
+  - tcp.host *(master only)*: Hostname or IP (IPv4/IPv6) of the remote device.
+  - tcp.listen *(slave only)*: Bind address for the listener. Use `0.0.0.0` for all IPv4 interfaces (default).
+  - tcp.port: Modbus TCP port (default: 502). For slave mode this is the local listening port.
   - rtu.device: Serial device path (e.g. `/dev/ttyUSB0`).
   - rtu.baud: Baud rate (e.g. 9600, 19200, 38400).
   - rtu.data_bits / rtu.stop_bits: Data bits (5–8) and stop bits (1–2).
@@ -128,9 +127,9 @@ logger:
 - master: Reads meter register data. Required when `meter` is configured. Two register models are auto-detected on connect — no manual selection needed:
   - *Fronius TS65-a proprietary* — direct RTU connection to a TS65-a smart meter.
   - *SunSpec* — all other cases: meter proxied via the inverter's TCP interface (use `unit_id: 240` for the primary meter, 241 for secondary), or any standalone SunSpec-compatible meter.
-- slave *(optional)*: Exposes a SunSpec-compliant Modbus TCP server so the inverter or another master can read meter values from fronius-bridge. Requires `meter.master` to be configured.
+- slave *(optional)*: Exposes a SunSpec-compliant Modbus server so the inverter or another master can read meter values from fronius-bridge. Either TCP or RTU may be used; for the standard Fronius use case, configure TCP. Requires `meter.master` to be configured. `meter.master` and `meter.slave` may not share the same RTU device.
   - request_timeout: Seconds to wait for a request before considering the session stalled.
-  - idle_timeout: Seconds before disconnecting an idle TCP client (TCP only).
+  - idle_timeout: Seconds of inactivity after which the client is treated as gone. In TCP mode the idle client is disconnected; in RTU mode the listener keeps running and simply marks the client inactive in the log.
   - use_float_model: `false` (default) exposes int+sf registers (Fronius-compatible); `true` exposes 32-bit IEEE 754 float registers.
 
 **mqtt**: Connection to the MQTT broker.
@@ -146,15 +145,15 @@ logger:
 
 ## Supported topologies
 
-**Inverter only** — omit the `meter` section. Reach the inverter over TCP or RTU; if both are configured TCP takes precedence.
+**Inverter only** — omit the `meter` section. Reach the inverter over TCP or RTU.
 
 **Meter only** — omit the `inverter` section. Useful for standalone meter monitoring.
 
 **Meter behind inverter (TCP proxy)** — configure `meter.master` with TCP pointing at the inverter's IP and `unit_id: 240` (primary meter per the Fronius Datamanager specification; secondary starts at 241). The inverter proxies register requests to the meter on its internal RS-485 port over SunSpec. No USB dongle required, and `meter.slave` is unnecessary since the inverter already has direct meter access.
 
-**Meter slave without inverter** — `meter.slave` can operate without `inverter` configured. fronius-bridge reads the meter via `meter.master` and serves the values over TCP to any Modbus master that connects.
+**Meter slave without inverter** — `meter.slave` can operate without `inverter` configured. fronius-bridge reads the meter via `meter.master` and serves the values over TCP (or RTU) to any Modbus master that connects.
 
-**Not yet supported: shared RTU bus** — a topology where `inverter.master` and `meter.master` share the same physical serial dongle is planned but not yet implemented.
+**Shared RTU bus** — `inverter.master` and `meter.master` may share the same physical serial dongle by setting both `inverter.rtu.device` and `meter.master.rtu.device` to the same path (e.g. `/dev/ttyUSB0`). fronius-bridge serializes all wire access on a shared device through a single transaction queue, so the inverter and meter are polled in turn rather than concurrently. When sharing, all RTU line parameters (`baud`, `data_bits`, `stop_bits`, `parity`) must match across the two sections; configurations with conflicting parameters are rejected at startup. The two devices must use different `unit_id` values.
 
 ## MQTT publishing
 

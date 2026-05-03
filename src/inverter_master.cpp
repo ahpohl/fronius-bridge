@@ -4,6 +4,7 @@
 #include "json_utils.h"
 #include <chrono>
 #include <expected>
+#include <fronius/fronius_bus.h>
 #include <fronius/fronius_types.h>
 #include <fronius/inverter.h>
 #include <fronius/modbus_config.h>
@@ -16,64 +17,88 @@
 using json = nlohmann::ordered_json;
 
 InverterMaster::InverterMaster(const InverterConfig &cfg,
-                               SignalHandler &signalHandler)
-    : cfg_(cfg), inverter_(makeModbusConfig(cfg)), handler_(signalHandler) {
+                               SignalHandler &signalHandler,
+                               std::shared_ptr<FroniusBus> bus)
+    : cfg_(cfg), handler_(signalHandler), bus_(std::move(bus)) {
 
   modbusLogger_ = spdlog::get("inverter");
   if (!modbusLogger_)
     modbusLogger_ = spdlog::default_logger();
 
-  // Inverter callbacks
-  inverter_.setConnectCallback([this](FroniusTypes::RegisterMap map) {
+  auto devCfg = makeDeviceConfig(cfg);
+  inverter_ = std::make_shared<Inverter>(bus_, devCfg);
+  bus_->registerDevice(inverter_);
+
+  // --- Bus-level callbacks ---
+
+  bus_->addBusConnectCallback([this] {
     if (cfg_.tcp) {
-      auto remote = inverter_.getRemoteEndpoint();
+      auto remote = bus_->getRemoteEndpoint();
       modbusLogger_->info("Inverter connected to {}:{}", remote.ip,
                           remote.port);
     } else {
       modbusLogger_->info("Inverter connected at {}", cfg_.rtu->device);
     }
+  });
+
+  bus_->addBusDisconnectCallback([this](int delay) {
+    modbusLogger_->warn(
+        "Inverter disconnected, trying to reconnect in {} {}...", delay,
+        delay == 1 ? "second" : "seconds");
+  });
+
+  bus_->addBusErrorCallback([this](const ModbusError &err) {
+    if (err.severity == ModbusError::Severity::FATAL) {
+      modbusLogger_->error("FATAL Modbus bus error: {}", err.describe());
+      handler_.shutdown();
+    } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
+      modbusLogger_->trace("Modbus bus operation cancelled due to shutdown: {}",
+                           err.describe());
+    }
+  });
+
+  // --- Device-level callbacks ---
+
+  inverter_->setDeviceReadyCallback([this](FroniusTypes::RegisterMap map) {
     modbusLogger_->debug("{} register map detected",
                          FroniusTypes::toString(map));
-
     connected_.store(true);
 
     if (availabilityCallback_)
       availabilityCallback_("connected");
   });
 
-  inverter_.setDisconnectCallback([this](int delay) {
-    modbusLogger_->warn(
-        "Inverter disconnected, trying to reconnect in {} {}...", delay,
-        delay == 1 ? "second" : "seconds");
-
-    connected_.store(false); // Explicit state update
+  inverter_->setDeviceUnavailableCallback([this] {
+    connected_.store(false);
 
     if (availabilityCallback_)
-      availabilityCallback_(connected_.load() ? "connected" : "disconnected");
+      availabilityCallback_("disconnected");
   });
 
-  inverter_.setErrorCallback([this](const ModbusError &err) {
+  inverter_->setDeviceErrorCallback([this](const ModbusError &err) {
     if (err.severity == ModbusError::Severity::FATAL) {
-      // Fatal error occurred - initiate shutdown sequence
       modbusLogger_->error("FATAL Modbus error: {}", err.describe());
       handler_.shutdown();
 
     } else if (err.severity == ModbusError::Severity::TRANSIENT) {
-      // Temporary error - disconnect and reconnect
       modbusLogger_->debug("Transient Modbus error: {}", err.describe());
       connected_.store(false);
-      inverter_.triggerReconnect();
+      bus_->scheduleDeviceRetry(inverter_);
 
     } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
-      // Shutdown already in progress - just exit cleanly
       modbusLogger_->trace("Modbus operation cancelled due to shutdown: {}",
                            err.describe());
       connected_.store(false);
     }
   });
 
-  // Start inverter connect loop
-  inverter_.connect();
+  inverter_->setDeviceRetryCallback([this](int delay) {
+    modbusLogger_->warn("Inverter unavailable, retrying in {} {}...", delay,
+                        delay == 1 ? "second" : "seconds");
+  });
+
+  // Start bus connect loop
+  bus_->connect();
 
   // Start update loop thread
   worker_ = std::thread(&InverterMaster::runLoop, this);
@@ -100,7 +125,7 @@ void InverterMaster::runLoop() {
         struct Entry {
           std::function<std::expected<void, ModbusError>()> update;
           std::function<std::string()> getJson;
-          std::function<void(std::string)> *callbackPtr; // pointer to callback
+          std::function<void(std::string)> *callbackPtr;
         };
 
         std::array<Entry, 3> entries = {{
@@ -176,16 +201,16 @@ InverterTypes::Values InverterMaster::getValues() const {
   return values_;
 }
 
-Inverter InverterMaster::makeModbusConfig(const InverterConfig &cfg) {
-  ModbusConfig mcfg;
+ModbusBusConfig InverterMaster::makeBusConfig(const InverterConfig &cfg) {
+  ModbusBusConfig busCfg;
 
   if (cfg.tcp) {
-    mcfg.transport = ModbusTcpTransport{
+    busCfg.transport = ModbusTcpTransport{
         .host = cfg.tcp->host,
         .port = cfg.tcp->port,
     };
   } else if (cfg.rtu) {
-    mcfg.transport = ModbusRtuTransport{
+    busCfg.transport = ModbusRtuTransport{
         .device = cfg.rtu->device,
         .baud = cfg.rtu->baud,
         .dataBits = cfg.rtu->dataBits,
@@ -197,21 +222,25 @@ Inverter InverterMaster::makeModbusConfig(const InverterConfig &cfg) {
   }
 
   // Enable debug only if logger is at trace level
-  auto modbusLogger = spdlog::get("inverter");
-  mcfg.debug = modbusLogger && (modbusLogger->level() == spdlog::level::trace);
+  auto mainLogger = spdlog::get("main");
+  busCfg.debug = mainLogger && (mainLogger->level() == spdlog::level::trace);
 
-  mcfg.slaveId = cfg.slaveId;
+  busCfg.reconnectDelay = cfg.reconnectDelay.min;
+  busCfg.reconnectDelayMax = cfg.reconnectDelay.max;
+  busCfg.exponential = cfg.reconnectDelay.exponential;
 
-  // Response timeout parameters
-  mcfg.secTimeout = cfg.responseTimeout.sec;
-  mcfg.usecTimeout = cfg.responseTimeout.usec;
+  return busCfg;
+}
 
-  // Reconnect parameters
-  mcfg.reconnectDelay = cfg.reconnectDelay.min;
-  mcfg.reconnectDelayMax = cfg.reconnectDelay.max;
-  mcfg.exponential = cfg.reconnectDelay.exponential;
-
-  return Inverter(mcfg);
+ModbusDeviceConfig InverterMaster::makeDeviceConfig(const InverterConfig &cfg) {
+  ModbusDeviceConfig devCfg;
+  devCfg.slaveId = cfg.slaveId;
+  devCfg.secTimeout = cfg.responseTimeout.sec;
+  devCfg.usecTimeout = cfg.responseTimeout.usec;
+  devCfg.reconnectDelay = cfg.reconnectDelay.min;
+  devCfg.reconnectDelayMax = cfg.reconnectDelay.max;
+  devCfg.exponential = cfg.reconnectDelay.exponential;
+  return devCfg;
 }
 
 std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
@@ -220,7 +249,7 @@ std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
         EINTR, "updateValuesAndJson(): Shutdown in progress"));
   }
 
-  auto regs = inverter_.fetchInverterRegisters();
+  auto regs = inverter_->fetchInverterRegisters();
   if (!regs) {
     return std::unexpected(regs.error());
   }
@@ -233,63 +262,63 @@ std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
 
   try {
     // AC values
-    values.acEnergy = ModbusError::getOrThrow(inverter_.getAcEnergy()) * 1e-3;
+    values.acEnergy = ModbusError::getOrThrow(inverter_->getAcEnergy()) * 1e-3;
     values.acPowerActive = ModbusError::getOrThrow(
-        inverter_.getAcPower(FroniusTypes::Output::ACTIVE));
+        inverter_->getAcPower(FroniusTypes::Output::ACTIVE));
     values.acPowerApparent = ModbusError::getOrThrow(
-        inverter_.getAcPower(FroniusTypes::Output::APPARENT));
+        inverter_->getAcPower(FroniusTypes::Output::APPARENT));
     values.acPowerReactive = ModbusError::getOrThrow(
-        inverter_.getAcPower(FroniusTypes::Output::REACTIVE));
+        inverter_->getAcPower(FroniusTypes::Output::REACTIVE));
     values.acPowerFactor = ModbusError::getOrThrow(
-        inverter_.getAcPower(FroniusTypes::Output::FACTOR));
+        inverter_->getAcPower(FroniusTypes::Output::FACTOR));
 
     // Phase 1
-    values.phase1.acVoltage =
-        ModbusError::getOrThrow(inverter_.getAcVoltage(FroniusTypes::Phase::A));
-    values.phase1.acCurrent =
-        ModbusError::getOrThrow(inverter_.getAcCurrent(FroniusTypes::Phase::A));
+    values.phase1.acVoltage = ModbusError::getOrThrow(
+        inverter_->getAcVoltage(FroniusTypes::Phase::A));
+    values.phase1.acCurrent = ModbusError::getOrThrow(
+        inverter_->getAcCurrent(FroniusTypes::Phase::A));
 
     // Phase 2
-    if (inverter_.getPhases() > 1) {
+    if (inverter_->getPhases() > 1) {
       values.phase2.acVoltage = ModbusError::getOrThrow(
-          inverter_.getAcVoltage(FroniusTypes::Phase::B));
+          inverter_->getAcVoltage(FroniusTypes::Phase::B));
       values.phase2.acCurrent = ModbusError::getOrThrow(
-          inverter_.getAcCurrent(FroniusTypes::Phase::B));
+          inverter_->getAcCurrent(FroniusTypes::Phase::B));
     }
 
     // Phase 3
-    if (inverter_.getPhases() > 2) {
+    if (inverter_->getPhases() > 2) {
       values.phase3.acVoltage = ModbusError::getOrThrow(
-          inverter_.getAcVoltage(FroniusTypes::Phase::C));
+          inverter_->getAcVoltage(FroniusTypes::Phase::C));
       values.phase3.acCurrent = ModbusError::getOrThrow(
-          inverter_.getAcCurrent(FroniusTypes::Phase::C));
+          inverter_->getAcCurrent(FroniusTypes::Phase::C));
     }
 
-    values.acFrequency = ModbusError::getOrThrow(inverter_.getAcFrequency());
+    values.acFrequency = ModbusError::getOrThrow(inverter_->getAcFrequency());
 
     // DC values
     values.dcPower = ModbusError::getOrThrow(
-        inverter_.getDcPower(FroniusTypes::Input::TOTAL));
+        inverter_->getDcPower(FroniusTypes::Input::TOTAL));
     values.input1.dcPower =
-        ModbusError::getOrThrow(inverter_.getDcPower(FroniusTypes::Input::A));
-    values.input1.dcVoltage =
-        ModbusError::getOrThrow(inverter_.getDcVoltage(FroniusTypes::Input::A));
-    values.input1.dcCurrent =
-        ModbusError::getOrThrow(inverter_.getDcCurrent(FroniusTypes::Input::A));
-    if (!inverter_.isHybrid())
-      values.input1.dcEnergy = ModbusError::getOrThrow(inverter_.getDcEnergy(
+        ModbusError::getOrThrow(inverter_->getDcPower(FroniusTypes::Input::A));
+    values.input1.dcVoltage = ModbusError::getOrThrow(
+        inverter_->getDcVoltage(FroniusTypes::Input::A));
+    values.input1.dcCurrent = ModbusError::getOrThrow(
+        inverter_->getDcCurrent(FroniusTypes::Input::A));
+    if (!inverter_->isHybrid())
+      values.input1.dcEnergy = ModbusError::getOrThrow(inverter_->getDcEnergy(
                                    FroniusTypes::Input::A)) *
                                1e-3;
 
-    if (inverter_.getInputs() == 2) {
-      values.input2.dcPower =
-          ModbusError::getOrThrow(inverter_.getDcPower(FroniusTypes::Input::B));
+    if (inverter_->getInputs() == 2) {
+      values.input2.dcPower = ModbusError::getOrThrow(
+          inverter_->getDcPower(FroniusTypes::Input::B));
       values.input2.dcVoltage = ModbusError::getOrThrow(
-          inverter_.getDcVoltage(FroniusTypes::Input::B));
+          inverter_->getDcVoltage(FroniusTypes::Input::B));
       values.input2.dcCurrent = ModbusError::getOrThrow(
-          inverter_.getDcCurrent(FroniusTypes::Input::B));
-      if (!inverter_.isHybrid())
-        values.input2.dcEnergy = ModbusError::getOrThrow(inverter_.getDcEnergy(
+          inverter_->getDcCurrent(FroniusTypes::Input::B));
+      if (!inverter_->isHybrid())
+        values.input2.dcEnergy = ModbusError::getOrThrow(inverter_->getDcEnergy(
                                      FroniusTypes::Input::B)) *
                                  1e-3;
     }
@@ -323,7 +352,7 @@ std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
       &values.phase1, &values.phase2, &values.phase3};
 
   int phaseCount =
-      std::clamp(inverter_.getPhases(), 1, static_cast<int>(phaseList.size()));
+      std::clamp(inverter_->getPhases(), 1, static_cast<int>(phaseList.size()));
 
   for (int i = 0; i < phaseCount; ++i) {
     phases.push_back({
@@ -344,7 +373,7 @@ std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
                                                            &values.input2};
 
   int inputCount =
-      std::clamp(inverter_.getInputs(), 1, static_cast<int>(inputList.size()));
+      std::clamp(inverter_->getInputs(), 1, static_cast<int>(inputList.size()));
 
   for (int i = 0; i < inputCount; ++i) {
     json input = {
@@ -354,7 +383,7 @@ std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
         {"dc_power", JsonUtils::roundTo(inputList[i]->dcPower, 1)},
     };
 
-    if (!inverter_.isHybrid()) {
+    if (!inverter_->isHybrid()) {
       input["dc_energy"] = JsonUtils::roundTo(inputList[i]->dcEnergy, 1);
     }
 
@@ -383,9 +412,9 @@ std::expected<void, ModbusError> InverterMaster::updateEventsAndJson() {
   InverterTypes::Events newEvents;
 
   try {
-    newEvents.activeCode = inverter_.getActiveStateCode();
-    newEvents.state = ModbusError::getOrThrow(inverter_.getState());
-    newEvents.events = ModbusError::getOrThrow(inverter_.getEvents());
+    newEvents.activeCode = inverter_->getActiveStateCode();
+    newEvents.state = ModbusError::getOrThrow(inverter_->getState());
+    newEvents.events = ModbusError::getOrThrow(inverter_->getEvents());
   } catch (const ModbusError &err) {
     modbusLogger_->warn("{}", err.message);
     return std::unexpected(err);
@@ -443,28 +472,28 @@ std::expected<void, ModbusError> InverterMaster::updateDeviceAndJson() {
 
   try {
     newDevice.manufacturer =
-        ModbusError::getOrThrow(inverter_.getManufacturer());
-    newDevice.model = ModbusError::getOrThrow(inverter_.getDeviceModel());
+        ModbusError::getOrThrow(inverter_->getManufacturer());
+    newDevice.model = ModbusError::getOrThrow(inverter_->getDeviceModel());
     newDevice.serialNumber =
-        ModbusError::getOrThrow(inverter_.getSerialNumber());
-    newDevice.fwVersion = ModbusError::getOrThrow(inverter_.getFwVersion());
+        ModbusError::getOrThrow(inverter_->getSerialNumber());
+    newDevice.fwVersion = ModbusError::getOrThrow(inverter_->getFwVersion());
     newDevice.dataManagerVersion =
-        ModbusError::getOrThrow(inverter_.getOptions());
+        ModbusError::getOrThrow(inverter_->getOptions());
     newDevice.registerModel =
-        inverter_.getUseFloatRegisters() ? "float" : "int+sf";
+        inverter_->getUseFloatRegisters() ? "float" : "int+sf";
     newDevice.slaveID =
-        ModbusError::getOrThrow(inverter_.getModbusDeviceAddress());
+        ModbusError::getOrThrow(inverter_->getModbusDeviceAddress());
     newDevice.acPowerApparent = ModbusError::getOrThrow(
-        inverter_.getAcPowerRating(FroniusTypes::Output::APPARENT));
+        inverter_->getAcPowerRating(FroniusTypes::Output::APPARENT));
   } catch (const ModbusError &err) {
     modbusLogger_->warn("{}", err.message);
     return std::unexpected(err);
   }
 
-  newDevice.id = inverter_.getId();
-  newDevice.isHybrid = inverter_.isHybrid();
-  newDevice.inputs = inverter_.getInputs();
-  newDevice.phases = inverter_.getPhases();
+  newDevice.id = inverter_->getId();
+  newDevice.isHybrid = inverter_->isHybrid();
+  newDevice.inputs = inverter_->getInputs();
+  newDevice.phases = inverter_->getPhases();
 
   // Compare received slave ID with configured
   if (cfg_.slaveId != newDevice.slaveID) {

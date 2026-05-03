@@ -102,9 +102,42 @@ int main(int argc, char *argv[]) {
     // --- Start MQTT client ---
     mqtt = std::make_unique<MqttClient>(cfg.mqtt, handler);
 
+    // --- Build bus registry ---
+    // Each unique device path or TCP endpoint gets exactly one FroniusBus.
+    // Devices sharing a physical RS-485 port share the instance, serialising
+    // all wire access through a single queue. validateConfig() has already
+    // guaranteed that shared RTU devices have identical line parameters,
+    // so the first config to claim a key is authoritative.
+    std::map<std::string, std::shared_ptr<FroniusBus>> buses;
+
+    auto busKey = [](const ModbusBusConfig &busCfg) -> std::string {
+      return busCfg.isRtu()
+                 ? busCfg.rtu().device
+                 : busCfg.tcp().host + ":" + std::to_string(busCfg.tcp().port);
+    };
+
+    auto registerBus = [&](const ModbusBusConfig &busCfg) {
+      auto key = busKey(busCfg);
+      if (buses.find(key) == buses.end())
+        buses.emplace(key, std::make_shared<FroniusBus>(busCfg));
+    };
+
+    if (cfg.meter)
+      registerBus(MeterMaster::makeBusConfig(cfg.meter->master));
+    if (cfg.inverter)
+      registerBus(InverterMaster::makeBusConfig(*cfg.inverter));
+
+    // --- Register bus log callback ---
+    for (auto &[key, bus] : buses) {
+      bus->addBusLogCallback([mainLogger](const std::string &msg) {
+        mainLogger->debug("{}", msg);
+      });
+    }
+
     // --- Start meter master ---
     if (cfg.meter) {
-      master.emplace(cfg.meter->master, handler);
+      auto busCfg = MeterMaster::makeBusConfig(cfg.meter->master);
+      master.emplace(cfg.meter->master, handler, buses.at(busKey(busCfg)));
 
       master->setValueCallback([&cfg, &mqtt,
                                 &slave](std::string jsonDump,
@@ -130,7 +163,8 @@ int main(int argc, char *argv[]) {
 
     // --- Start inverter ---
     if (cfg.inverter) {
-      inverter.emplace(*cfg.inverter, handler);
+      auto busCfg = InverterMaster::makeBusConfig(*cfg.inverter);
+      inverter.emplace(*cfg.inverter, handler, buses.at(busKey(busCfg)));
 
       inverter->setValueCallback([&mqtt, &cfg](std::string jsonDump) {
         mqtt->publish(std::move(jsonDump), cfg.mqtt.topic + "/inverter/values");
