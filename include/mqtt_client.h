@@ -26,7 +26,7 @@ private:
   MqttConfig cfg_;
 
   // Logger
-  std::shared_ptr<spdlog::logger> mqttLogger_;
+  std::shared_ptr<spdlog::logger> logger_;
 
   // State
   std::atomic<bool> connected_{false};

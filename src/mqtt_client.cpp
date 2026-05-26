@@ -9,9 +9,9 @@ MqttClient::MqttClient(const MqttConfig &cfg, SignalHandler &signalHandler)
     : cfg_(cfg), handler_(signalHandler) {
 
   // Setup mqtt logger
-  mqttLogger_ = spdlog::get("mqtt");
-  if (!mqttLogger_)
-    mqttLogger_ = spdlog::default_logger();
+  logger_ = spdlog::get("mqtt");
+  if (!logger_)
+    logger_ = spdlog::default_logger();
 
   // Create Mosquitto client
   mosquitto_lib_init();
@@ -50,8 +50,8 @@ MqttClient::MqttClient(const MqttConfig &cfg, SignalHandler &signalHandler)
   // Connect to broker
   rc = mosquitto_connect_async(mosq_, opt_c_str(cfg_.broker), cfg_.port, 60);
   if (rc != MOSQ_ERR_SUCCESS) {
-    mqttLogger_->warn("MQTT: initial connect failed (async): {}",
-                      mosquitto_strerror(rc));
+    logger_->warn("MQTT: initial connect failed (async): {}",
+                  mosquitto_strerror(rc));
   }
 
   // Start worker thread to process queue
@@ -106,12 +106,12 @@ void MqttClient::publish(std::string payload, const std::string &topic) {
   // Logging only if disconnected
   if (!connected_.load()) {
     if (droppedCount_[topic] > 0) {
-      mqttLogger_->warn("MQTT queue full for topic '{}', dropped oldest "
-                        "message (total dropped: {})",
-                        topic, droppedCount_[topic]);
+      logger_->warn("MQTT queue full for topic '{}', dropped oldest "
+                    "message (total dropped: {})",
+                    topic, droppedCount_[topic]);
     } else {
       if (q.size() > 0) {
-        mqttLogger_->debug(
+        logger_->debug(
             "Waiting for MQTT connection... ({} messages cached for '{}')",
             q.size(), topic);
       }
@@ -135,7 +135,7 @@ void MqttClient::run() {
         break;
       }
       if (hasQueuedMessages()) {
-        mqttLogger_->debug("Shutdown detected, flushing remaining messages");
+        logger_->debug("Shutdown detected, flushing remaining messages");
       }
     }
 
@@ -150,19 +150,19 @@ void MqttClient::run() {
         lock.lock();
         if (rc == MOSQ_ERR_SUCCESS) {
           q.pop();
-          mqttLogger_->debug("Published MQTT message to topic '{}': {}", topic,
-                             payload);
+          logger_->debug("Published MQTT message to topic '{}': {}", topic,
+                         payload);
           droppedCount_[topic] = 0;
         } else {
-          mqttLogger_->error("MQTT publish failed for '{}': {}", topic,
-                             mosquitto_strerror(rc));
+          logger_->error("MQTT publish failed for '{}': {}", topic,
+                         mosquitto_strerror(rc));
           break;
         }
       }
     }
   }
 
-  mqttLogger_->debug("MQTT run loop stopped.");
+  logger_->debug("MQTT run loop stopped.");
 }
 
 void MqttClient::onConnect(struct mosquitto *, void *obj, int rc) {
@@ -172,10 +172,10 @@ void MqttClient::onConnect(struct mosquitto *, void *obj, int rc) {
   self->cv_.notify_one();
 
   if (rc == 0)
-    self->mqttLogger_->info("MQTT connected");
+    self->logger_->info("MQTT connected");
   else
-    self->mqttLogger_->warn("MQTT connection failed: {} ({}), will retry...",
-                            mosquitto_strerror(rc), rc);
+    self->logger_->warn("MQTT connection failed: {} ({}), will retry...",
+                        mosquitto_strerror(rc), rc);
 }
 
 void MqttClient::onDisconnect(struct mosquitto *mosq, void *obj, int rc) {
@@ -184,9 +184,9 @@ void MqttClient::onDisconnect(struct mosquitto *mosq, void *obj, int rc) {
   self->connected_ = false;
 
   if (rc == 0) {
-    self->mqttLogger_->info("MQTT disconnected");
+    self->logger_->info("MQTT disconnected");
   } else {
-    self->mqttLogger_->warn(
+    self->logger_->warn(
         "MQTT disconnected unexpectedly: {} ({}), will retry...",
         mosquitto_strerror(rc), rc);
   }
@@ -217,5 +217,5 @@ void MqttClient::onLog(struct mosquitto *mosq, void *obj, int level,
     break;
   }
 
-  self->mqttLogger_->log(spdLevel, "mosquitto [{}]: {}", level, str);
+  self->logger_->log(spdLevel, "mosquitto [{}]: {}", level, str);
 }

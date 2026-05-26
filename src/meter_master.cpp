@@ -17,50 +17,57 @@
 
 using json = nlohmann::ordered_json;
 
-MeterMaster::MeterMaster(const MeterMasterConfig &cfg,
-                         SignalHandler &signalHandler,
+MeterMaster::MeterMaster(const MeterConfig &cfg, SignalHandler &signalHandler,
                          std::shared_ptr<FroniusBus> bus)
-    : cfg_(cfg), handler_(signalHandler), bus_(std::move(bus)) {
+    : bus_(std::move(bus)), cfg_(cfg), handler_(signalHandler) {
 
-  modbusLogger_ = spdlog::get("meter.master");
-  if (!modbusLogger_)
-    modbusLogger_ = spdlog::default_logger();
+  logger_ = spdlog::get(cfg_.name + ".master");
+  if (!logger_)
+    logger_ = spdlog::get(cfg_.name);
+  if (!logger_)
+    logger_ = spdlog::default_logger();
 
-  auto devCfg = makeDeviceConfig(cfg);
+  auto devCfg = makeDeviceConfig(cfg_);
   meter_ = std::make_shared<Meter>(bus_, devCfg);
   bus_->registerDevice(meter_);
 
   // --- Bus-level callbacks ---
+  //
+  // The returned CallbackId for each is stored so the destructor can
+  // remove it from the bus before any of the lambdas' captured state
+  // (this, logger_, handler_) is destroyed.
 
-  bus_->addBusConnectCallback([this] {
+  busCallbackIds_.push_back(bus_->addBusConnectCallback([this] {
     if (cfg_.tcp) {
       auto remote = bus_->getRemoteEndpoint();
-      modbusLogger_->info("Meter connected to {}:{}", remote.ip, remote.port);
+      logger_->info("Meter '{}' connected to {}:{}", cfg_.name, remote.ip,
+                    remote.port);
     } else {
-      modbusLogger_->info("Meter connected at {}", cfg_.rtu->device);
+      logger_->info("Meter '{}' connected at {}", cfg_.name, cfg_.rtu->device);
     }
-  });
+  }));
 
-  bus_->addBusDisconnectCallback([this](int delay) {
-    modbusLogger_->warn("Meter disconnected, trying to reconnect in {} {}...",
-                        delay, delay == 1 ? "second" : "seconds");
-  });
+  busCallbackIds_.push_back(bus_->addBusDisconnectCallback([this](int delay) {
+    logger_->warn("Meter '{}' disconnected, trying to reconnect in {} {}...",
+                  cfg_.name, delay, delay == 1 ? "second" : "seconds");
+  }));
 
-  bus_->addBusErrorCallback([this](const ModbusError &err) {
-    if (err.severity == ModbusError::Severity::FATAL) {
-      modbusLogger_->error("FATAL Modbus bus error: {}", err.describe());
-      handler_.shutdown();
-    } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
-      modbusLogger_->trace("Modbus bus operation cancelled due to shutdown: {}",
-                           err.describe());
-    }
-  });
+  busCallbackIds_.push_back(
+      bus_->addBusErrorCallback([this](const ModbusError &err) {
+        if (err.severity == ModbusError::Severity::FATAL) {
+          logger_->error("FATAL Modbus bus error: {}", err.describe());
+          handler_.shutdown();
+        } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
+          logger_->trace("Modbus bus operation cancelled due to shutdown: {}",
+                         err.describe());
+        }
+      }));
 
   // --- Device-level callbacks ---
 
   meter_->setDeviceReadyCallback([this](FroniusTypes::RegisterMap map) {
-    modbusLogger_->debug("{} register map detected",
-                         FroniusTypes::toString(map));
+    logger_->debug("Meter '{}' register map: {}", cfg_.name,
+                   FroniusTypes::toString(map));
     connected_.store(true);
 
     if (availabilityCallback_)
@@ -76,44 +83,78 @@ MeterMaster::MeterMaster(const MeterMasterConfig &cfg,
 
   meter_->setDeviceErrorCallback([this](const ModbusError &err) {
     if (err.severity == ModbusError::Severity::FATAL) {
-      modbusLogger_->error("FATAL Modbus error: {}", err.describe());
+      logger_->error("FATAL Modbus error: {}", err.describe());
       handler_.shutdown();
 
     } else if (err.severity == ModbusError::Severity::TRANSIENT) {
-      modbusLogger_->debug("Transient Modbus error: {}", err.describe());
+      logger_->debug("Transient Modbus error: {}", err.describe());
       connected_.store(false);
       bus_->scheduleDeviceRetry(meter_);
 
     } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
-      modbusLogger_->trace("Modbus operation cancelled due to shutdown: {}",
-                           err.describe());
+      logger_->trace("Modbus operation cancelled due to shutdown: {}",
+                     err.describe());
       connected_.store(false);
     }
   });
 
   meter_->setDeviceRetryCallback([this](int delay) {
-    modbusLogger_->warn("Meter unavailable, retrying in {} {}...", delay,
-                        delay == 1 ? "second" : "seconds");
+    logger_->warn("Meter '{}' unavailable, retrying in {} {}...", cfg_.name,
+                  delay, delay == 1 ? "second" : "seconds");
   });
 
-  // Start bus connect loop
-  bus_->connect();
+  // NOTE: bus_->connect() is intentionally NOT called here. With shared
+  // buses, main() is responsible for calling connect() exactly once per bus
+  // after every master sharing that bus has constructed and registered its
+  // callbacks. Calling connect() from each master would race with later
+  // masters' callback registrations — the bus could connect (and fire its
+  // onBusConnect_ callbacks) before subsequent masters had added theirs.
 
-  // Start update loop thread
+  // Start update loop thread. It is harmless until the bus connects: the
+  // loop's body only runs when connected_ flips true, which the device-ready
+  // callback above does, which only fires after bus->connect() + validation.
   worker_ = std::thread(&MeterMaster::runLoop, this);
 }
 
 MeterMaster::~MeterMaster() {
-  connected_.store(false);
-  if (availabilityCallback_) {
-    availabilityCallback_(connected_.load() ? "connected" : "disconnected");
+  // Tell the bus to stop calling into us, in two parts:
+  //
+  //   1. unregisterDevice removes us from the bus's device registry and
+  //      cancels any in-flight per-device retry loop, so the bus stops
+  //      walking the registry to call into a soon-to-die object.
+  //
+  //   2. removeBusCallback synchronously removes each bus-level callback
+  //      we registered. It waits for the bus thread to finish any
+  //      in-flight invocation of those callbacks, so the lambdas
+  //      capturing [this], logger_, and handler_ are guaranteed
+  //      not to run again before we destroy that state.
+  //
+  // If the bus outlives us (another master sharing it is still holding
+  // a reference), it continues to serve other devices uninterrupted.
+  if (bus_) {
+    if (meter_)
+      bus_->unregisterDevice(meter_.get());
+    for (auto id : busCallbackIds_)
+      bus_->removeBusCallback(id);
   }
+  busCallbackIds_.clear();
 
+  // Stop the local update loop. The worker observes handler_.isRunning()
+  // (cleared at signal time) and our cv_, so under graceful shutdown it
+  // is usually already at its wait point and exits immediately on notify.
+  connected_.store(false);
   cv_.notify_all();
   if (worker_.joinable())
     worker_.join();
 
-  modbusLogger_->info("Meter disconnected");
+  // Fire one final availability update so MQTT consumers see this meter
+  // go offline. Done after the worker join so it can't race with an
+  // in-flight updateValuesAndJson(). Safe because main destroys masters
+  // before destroying MqttClient.
+  if (availabilityCallback_)
+    availabilityCallback_("disconnected");
+
+  logger_->info("Meter '{}' disconnected", cfg_.name);
 }
 
 void MeterMaster::runLoop() {
@@ -121,11 +162,11 @@ void MeterMaster::runLoop() {
 
     if (connected_.load()) {
       {
-        // --- Device (once) ---
+        // --- Device (once per connect; bool tells us whether to publish) ---
         auto deviceResult = updateDeviceAndJson();
         if (!deviceResult) {
           connected_.store(false);
-        } else if (deviceCallback_ && handler_.isRunning()) {
+        } else if (*deviceResult && deviceCallback_ && handler_.isRunning()) {
           std::string json;
           MeterTypes::Device dev;
           {
@@ -159,7 +200,7 @@ void MeterMaster::runLoop() {
                  [this] { return !handler_.isRunning(); });
   }
 
-  modbusLogger_->debug("Modbus master run loop stopped.");
+  logger_->debug("Modbus master run loop stopped.");
 }
 
 void MeterMaster::setValueCallback(
@@ -189,7 +230,7 @@ MeterTypes::Values MeterMaster::getValues() const {
   return values_;
 }
 
-ModbusBusConfig MeterMaster::makeBusConfig(const MeterMasterConfig &cfg) {
+ModbusBusConfig MeterMaster::makeBusConfig(const MeterConfig &cfg) {
   ModbusBusConfig busCfg;
 
   if (cfg.tcp) {
@@ -220,7 +261,7 @@ ModbusBusConfig MeterMaster::makeBusConfig(const MeterMasterConfig &cfg) {
   return busCfg;
 }
 
-ModbusDeviceConfig MeterMaster::makeDeviceConfig(const MeterMasterConfig &cfg) {
+ModbusDeviceConfig MeterMaster::makeDeviceConfig(const MeterConfig &cfg) {
   ModbusDeviceConfig devCfg;
   devCfg.slaveId = cfg.slaveId;
   devCfg.secTimeout = cfg.responseTimeout.sec;
@@ -369,7 +410,7 @@ std::expected<void, ModbusError> MeterMaster::updateValuesAndJson() {
     }
 
   } catch (const ModbusError &err) {
-    modbusLogger_->warn("{}", err.message);
+    logger_->warn("{}", err.message);
     return std::unexpected(err);
   }
 
@@ -445,19 +486,19 @@ std::expected<void, ModbusError> MeterMaster::updateValuesAndJson() {
     jsonValues_ = std::move(newJson);
   }
 
-  modbusLogger_->debug("{}", jsonValues_.dump());
+  logger_->debug("{}", jsonValues_.dump());
 
   return {};
 }
 
-std::expected<void, ModbusError> MeterMaster::updateDeviceAndJson() {
+std::expected<bool, ModbusError> MeterMaster::updateDeviceAndJson() {
   if (!handler_.isRunning()) {
     return std::unexpected(ModbusError::custom(
         EINTR, "updateDeviceAndJson(): Shutdown in progress"));
   }
 
   if (deviceUpdated_.load())
-    return {};
+    return false;
 
   MeterTypes::Device newDevice;
 
@@ -472,7 +513,7 @@ std::expected<void, ModbusError> MeterMaster::updateDeviceAndJson() {
     newDevice.slaveID =
         ModbusError::getOrThrow(meter_->getModbusDeviceAddress());
   } catch (const ModbusError &err) {
-    modbusLogger_->warn("{}", err.message);
+    logger_->warn("{}", err.message);
     return std::unexpected(err);
   }
 
@@ -481,8 +522,8 @@ std::expected<void, ModbusError> MeterMaster::updateDeviceAndJson() {
 
   // Compare received slave ID with configured
   if (cfg_.slaveId != newDevice.slaveID) {
-    modbusLogger_->warn("Slave ID mismatch: configured {}, received {}",
-                        cfg_.slaveId, newDevice.slaveID);
+    logger_->warn("Slave ID mismatch: configured {}, received {}", cfg_.slaveId,
+                  newDevice.slaveID);
   }
 
   // ---- Build ordered JSON ----
@@ -497,7 +538,7 @@ std::expected<void, ModbusError> MeterMaster::updateDeviceAndJson() {
   newJson["meter_id"] = newDevice.id;
   newJson["phases"] = newDevice.phases;
 
-  modbusLogger_->debug("{}", newJson.dump());
+  logger_->debug("{}", newJson.dump());
 
   // ---- Commit values ----
   {
@@ -508,5 +549,5 @@ std::expected<void, ModbusError> MeterMaster::updateDeviceAndJson() {
 
   deviceUpdated_.store(true);
 
-  return {};
+  return true;
 }

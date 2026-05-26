@@ -19,49 +19,56 @@ using json = nlohmann::ordered_json;
 InverterMaster::InverterMaster(const InverterConfig &cfg,
                                SignalHandler &signalHandler,
                                std::shared_ptr<FroniusBus> bus)
-    : cfg_(cfg), handler_(signalHandler), bus_(std::move(bus)) {
+    : bus_(std::move(bus)), cfg_(cfg), handler_(signalHandler) {
 
-  modbusLogger_ = spdlog::get("inverter");
-  if (!modbusLogger_)
-    modbusLogger_ = spdlog::default_logger();
+  logger_ = spdlog::get(cfg_.name + ".master");
+  if (!logger_)
+    logger_ = spdlog::get(cfg_.name);
+  if (!logger_)
+    logger_ = spdlog::default_logger();
 
-  auto devCfg = makeDeviceConfig(cfg);
+  auto devCfg = makeDeviceConfig(cfg_);
   inverter_ = std::make_shared<Inverter>(bus_, devCfg);
   bus_->registerDevice(inverter_);
 
   // --- Bus-level callbacks ---
+  //
+  // The returned CallbackId for each is stored so the destructor can
+  // remove it from the bus before any of the lambdas' captured state
+  // (this,logger_, handler_) is destroyed.
 
-  bus_->addBusConnectCallback([this] {
+  busCallbackIds_.push_back(bus_->addBusConnectCallback([this] {
     if (cfg_.tcp) {
       auto remote = bus_->getRemoteEndpoint();
-      modbusLogger_->info("Inverter connected to {}:{}", remote.ip,
-                          remote.port);
+      logger_->info("Inverter '{}' connected to {}:{}", cfg_.name, remote.ip,
+                    remote.port);
     } else {
-      modbusLogger_->info("Inverter connected at {}", cfg_.rtu->device);
+      logger_->info("Inverter '{}' connected at {}", cfg_.name,
+                    cfg_.rtu->device);
     }
-  });
+  }));
 
-  bus_->addBusDisconnectCallback([this](int delay) {
-    modbusLogger_->warn(
-        "Inverter disconnected, trying to reconnect in {} {}...", delay,
-        delay == 1 ? "second" : "seconds");
-  });
+  busCallbackIds_.push_back(bus_->addBusDisconnectCallback([this](int delay) {
+    logger_->warn("Inverter '{}' disconnected, trying to reconnect in {} {}...",
+                  cfg_.name, delay, delay == 1 ? "second" : "seconds");
+  }));
 
-  bus_->addBusErrorCallback([this](const ModbusError &err) {
-    if (err.severity == ModbusError::Severity::FATAL) {
-      modbusLogger_->error("FATAL Modbus bus error: {}", err.describe());
-      handler_.shutdown();
-    } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
-      modbusLogger_->trace("Modbus bus operation cancelled due to shutdown: {}",
-                           err.describe());
-    }
-  });
+  busCallbackIds_.push_back(
+      bus_->addBusErrorCallback([this](const ModbusError &err) {
+        if (err.severity == ModbusError::Severity::FATAL) {
+          logger_->error("FATAL Modbus bus error: {}", err.describe());
+          handler_.shutdown();
+        } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
+          logger_->trace("Modbus bus operation cancelled due to shutdown: {}",
+                         err.describe());
+        }
+      }));
 
   // --- Device-level callbacks ---
 
   inverter_->setDeviceReadyCallback([this](FroniusTypes::RegisterMap map) {
-    modbusLogger_->debug("{} register map detected",
-                         FroniusTypes::toString(map));
+    logger_->debug("Inverter '{}' register map: {}", cfg_.name,
+                   FroniusTypes::toString(map));
     connected_.store(true);
 
     if (availabilityCallback_)
@@ -77,44 +84,78 @@ InverterMaster::InverterMaster(const InverterConfig &cfg,
 
   inverter_->setDeviceErrorCallback([this](const ModbusError &err) {
     if (err.severity == ModbusError::Severity::FATAL) {
-      modbusLogger_->error("FATAL Modbus error: {}", err.describe());
+      logger_->error("FATAL Modbus error: {}", err.describe());
       handler_.shutdown();
 
     } else if (err.severity == ModbusError::Severity::TRANSIENT) {
-      modbusLogger_->debug("Transient Modbus error: {}", err.describe());
+      logger_->debug("Transient Modbus error: {}", err.describe());
       connected_.store(false);
       bus_->scheduleDeviceRetry(inverter_);
 
     } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
-      modbusLogger_->trace("Modbus operation cancelled due to shutdown: {}",
-                           err.describe());
+      logger_->trace("Modbus operation cancelled due to shutdown: {}",
+                     err.describe());
       connected_.store(false);
     }
   });
 
   inverter_->setDeviceRetryCallback([this](int delay) {
-    modbusLogger_->warn("Inverter unavailable, retrying in {} {}...", delay,
-                        delay == 1 ? "second" : "seconds");
+    logger_->warn("Inverter '{}' unavailable, retrying in {} {}...", cfg_.name,
+                  delay, delay == 1 ? "second" : "seconds");
   });
 
-  // Start bus connect loop
-  bus_->connect();
+  // NOTE: bus_->connect() is intentionally NOT called here. With shared
+  // buses, main() is responsible for calling connect() exactly once per bus
+  // after every master sharing that bus has constructed and registered its
+  // callbacks. Calling connect() from each master would race with later
+  // masters' callback registrations — the bus could connect (and fire its
+  // onBusConnect_ callbacks) before subsequent masters had added theirs.
 
-  // Start update loop thread
+  // Start update loop thread. It is harmless until the bus connects: the
+  // loop's body only runs when connected_ flips true, which the device-ready
+  // callback above does, which only fires after bus->connect() + validation.
   worker_ = std::thread(&InverterMaster::runLoop, this);
 }
 
 InverterMaster::~InverterMaster() {
-  connected_.store(false);
-  if (availabilityCallback_) {
-    availabilityCallback_(connected_.load() ? "connected" : "disconnected");
+  // Tell the bus to stop calling into us, in two parts:
+  //
+  //   1. unregisterDevice removes us from the bus's device registry and
+  //      cancels any in-flight per-device retry loop, so the bus stops
+  //      walking the registry to call into a soon-to-die object.
+  //
+  //   2. removeBusCallback synchronously removes each bus-level callback
+  //      we registered. It waits for the bus thread to finish any
+  //      in-flight invocation of those callbacks, so the lambdas
+  //      capturing [this],logger_, and handler_ are guaranteed
+  //      not to run again before we destroy that state.
+  //
+  // If the bus outlives us (another master sharing it is still holding
+  // a reference), it continues to serve other devices uninterrupted.
+  if (bus_) {
+    if (inverter_)
+      bus_->unregisterDevice(inverter_.get());
+    for (auto id : busCallbackIds_)
+      bus_->removeBusCallback(id);
   }
+  busCallbackIds_.clear();
 
+  // Stop the local update loop. The worker observes handler_.isRunning()
+  // (cleared at signal time) and our cv_, so under graceful shutdown it
+  // is usually already at its wait point and exits immediately on notify.
+  connected_.store(false);
   cv_.notify_all();
   if (worker_.joinable())
     worker_.join();
 
-  modbusLogger_->info("Inverter disconnected");
+  // Fire one final availability update so MQTT consumers see this inverter
+  // go offline. Done after the worker join so it can't race with an
+  // in-flight update*AndJson(). Safe because main destroys masters before
+  // destroying MqttClient.
+  if (availabilityCallback_)
+    availabilityCallback_("disconnected");
+
+  logger_->info("Inverter '{}' disconnected", cfg_.name);
 }
 
 void InverterMaster::runLoop() {
@@ -122,41 +163,49 @@ void InverterMaster::runLoop() {
 
     if (connected_.load()) {
       {
-        struct Entry {
-          std::function<std::expected<void, ModbusError>()> update;
-          std::function<std::string()> getJson;
-          std::function<void(std::string)> *callbackPtr;
-        };
-
-        std::array<Entry, 3> entries = {{
-            {[this] { return updateDeviceAndJson(); },
-             [this] { return jsonDevice_.dump(); }, &deviceCallback_},
-            {[this] { return updateValuesAndJson(); },
-             [this] { return jsonValues_.dump(); }, &valueCallback_},
-            {[this] { return updateEventsAndJson(); },
-             [this] { return jsonEvents_.dump(); }, &eventCallback_},
-        }};
-
-        for (const auto &e : entries) {
-          auto result = e.update();
-          if (!result) {
-            connected_.store(false);
-            continue;
-          }
-
-          // Skip if callback not registered
-          if (!*e.callbackPtr)
-            continue;
-
+        // --- Device (once per connect; bool tells us whether to publish) ---
+        auto deviceResult = updateDeviceAndJson();
+        if (!deviceResult) {
+          connected_.store(false);
+        } else if (*deviceResult && deviceCallback_ && handler_.isRunning()) {
           std::string json;
+          InverterTypes::Device dev;
           {
             std::lock_guard<std::mutex> lock(cbMutex_);
-            json = e.getJson();
+            json = jsonDevice_.dump();
+            dev = device_;
           }
+          deviceCallback_(std::move(json), std::move(dev));
+        }
 
-          // Execute callback outside lock
-          if (handler_.isRunning())
-            (*e.callbackPtr)(json);
+        // --- Values ---
+        auto valuesResult = updateValuesAndJson();
+        if (!valuesResult) {
+          connected_.store(false);
+        } else if (valueCallback_ && handler_.isRunning()) {
+          std::string json;
+          InverterTypes::Values vals;
+          {
+            std::lock_guard<std::mutex> lock(cbMutex_);
+            json = jsonValues_.dump();
+            vals = values_;
+          }
+          valueCallback_(std::move(json), std::move(vals));
+        }
+
+        // --- Events (de-duplicated by lastEventsHash_ inside the update) ---
+        auto eventsResult = updateEventsAndJson();
+        if (!eventsResult) {
+          connected_.store(false);
+        } else if (eventCallback_ && handler_.isRunning()) {
+          std::string json;
+          InverterTypes::Events evts;
+          {
+            std::lock_guard<std::mutex> lock(cbMutex_);
+            json = jsonEvents_.dump();
+            evts = events_;
+          }
+          eventCallback_(std::move(json), std::move(evts));
         }
       }
     }
@@ -167,20 +216,23 @@ void InverterMaster::runLoop() {
                  [this] { return !handler_.isRunning(); });
   }
 
-  modbusLogger_->debug("Modbus master run loop stopped.");
+  logger_->debug("Modbus master run loop stopped.");
 }
 
-void InverterMaster::setValueCallback(std::function<void(std::string)> cb) {
+void InverterMaster::setValueCallback(
+    std::function<void(std::string, InverterTypes::Values)> cb) {
   std::lock_guard<std::mutex> lock(cbMutex_);
   valueCallback_ = std::move(cb);
 }
 
-void InverterMaster::setEventCallback(std::function<void(std::string)> cb) {
+void InverterMaster::setEventCallback(
+    std::function<void(std::string, InverterTypes::Events)> cb) {
   std::lock_guard<std::mutex> lock(cbMutex_);
   eventCallback_ = std::move(cb);
 }
 
-void InverterMaster::setDeviceCallback(std::function<void(std::string)> cb) {
+void InverterMaster::setDeviceCallback(
+    std::function<void(std::string, InverterTypes::Device)> cb) {
   std::lock_guard<std::mutex> lock(cbMutex_);
   deviceCallback_ = std::move(cb);
 }
@@ -324,7 +376,7 @@ std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
     }
 
   } catch (const ModbusError &err) {
-    modbusLogger_->warn("{}", err.message);
+    logger_->warn("{}", err.message);
     return std::unexpected(err);
   }
 
@@ -391,7 +443,7 @@ std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
   }
   newJson["inputs"] = std::move(inputs);
 
-  modbusLogger_->debug("{}", newJson.dump());
+  logger_->debug("{}", newJson.dump());
 
   // ---- Commit values ----
   {
@@ -416,7 +468,7 @@ std::expected<void, ModbusError> InverterMaster::updateEventsAndJson() {
     newEvents.state = ModbusError::getOrThrow(inverter_->getState());
     newEvents.events = ModbusError::getOrThrow(inverter_->getEvents());
   } catch (const ModbusError &err) {
-    modbusLogger_->warn("{}", err.message);
+    logger_->warn("{}", err.message);
     return std::unexpected(err);
   }
 
@@ -430,7 +482,7 @@ std::expected<void, ModbusError> InverterMaster::updateEventsAndJson() {
     const std::size_t currentHash = std::hash<std::string>{}(oss.str());
 
     if (!lastEventsHash_.has_value() || currentHash != *lastEventsHash_) {
-      modbusLogger_->warn("Inverter reported events: [{}]", oss.str());
+      logger_->warn("Inverter reported events: [{}]", oss.str());
       lastEventsHash_ = currentHash;
     }
   } else {
@@ -447,7 +499,7 @@ std::expected<void, ModbusError> InverterMaster::updateEventsAndJson() {
     newJson["events"].push_back(e);
   }
 
-  modbusLogger_->debug("{}", newJson.dump());
+  logger_->debug("{}", newJson.dump());
 
   // ---- Commit events ----
   {
@@ -459,14 +511,14 @@ std::expected<void, ModbusError> InverterMaster::updateEventsAndJson() {
   return {};
 }
 
-std::expected<void, ModbusError> InverterMaster::updateDeviceAndJson() {
+std::expected<bool, ModbusError> InverterMaster::updateDeviceAndJson() {
   if (!handler_.isRunning()) {
     return std::unexpected(ModbusError::custom(
         EINTR, "updateDeviceAndJson(): Shutdown in progress"));
   }
 
   if (deviceUpdated_.load())
-    return {};
+    return false;
 
   InverterTypes::Device newDevice;
 
@@ -486,7 +538,7 @@ std::expected<void, ModbusError> InverterMaster::updateDeviceAndJson() {
     newDevice.acPowerApparent = ModbusError::getOrThrow(
         inverter_->getAcPowerRating(FroniusTypes::Output::APPARENT));
   } catch (const ModbusError &err) {
-    modbusLogger_->warn("{}", err.message);
+    logger_->warn("{}", err.message);
     return std::unexpected(err);
   }
 
@@ -497,8 +549,8 @@ std::expected<void, ModbusError> InverterMaster::updateDeviceAndJson() {
 
   // Compare received slave ID with configured
   if (cfg_.slaveId != newDevice.slaveID) {
-    modbusLogger_->warn("Slave ID mismatch: configured {}, received {}",
-                        cfg_.slaveId, newDevice.slaveID);
+    logger_->warn("Slave ID mismatch: configured {}, received {}", cfg_.slaveId,
+                  newDevice.slaveID);
   }
 
   // ---- Build ordered JSON ----
@@ -517,7 +569,7 @@ std::expected<void, ModbusError> InverterMaster::updateDeviceAndJson() {
   newJson["phases"] = newDevice.phases;
   newJson["power_rating"] = newDevice.acPowerApparent;
 
-  modbusLogger_->debug("{}", newJson.dump());
+  logger_->debug("{}", newJson.dump());
 
   // ---- Commit values ----
   {
@@ -528,5 +580,5 @@ std::expected<void, ModbusError> InverterMaster::updateDeviceAndJson() {
 
   deviceUpdated_.store(true);
 
-  return {};
+  return true;
 }

@@ -16,13 +16,15 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-MeterSlave::MeterSlave(const MeterSlaveConfig &cfg,
+MeterSlave::MeterSlave(const MeterSlaveConfig &cfg, std::string meterName,
                        SignalHandler &signalHandler)
-    : cfg_(cfg), handler_(signalHandler) {
+    : name_(std::move(meterName)), cfg_(cfg), handler_(signalHandler) {
 
-  modbusLogger_ = spdlog::get("meter.slave");
-  if (!modbusLogger_)
-    modbusLogger_ = spdlog::default_logger();
+  logger_ = spdlog::get(name_ + ".slave");
+  if (!logger_)
+    logger_ = spdlog::get(name_);
+  if (!logger_)
+    logger_ = spdlog::default_logger();
 
   auto listenAction = startListener();
   if (!listenAction) {
@@ -49,8 +51,8 @@ MeterSlave::~MeterSlave() {
 
   if (serverSocket_ != -1) {
     close(serverSocket_);
-    modbusLogger_->info("Stopped Modbus {} listener",
-                        (cfg_.tcp ? "TCP" : "RTU"));
+    logger_->info("Meter '{}' stopped Modbus {} listener", name_,
+                  (cfg_.tcp ? "TCP" : "RTU"));
   }
   if (listenCtx_)
     modbus_free(listenCtx_);
@@ -126,7 +128,8 @@ std::expected<void, ModbusError> MeterSlave::startListener(void) {
         "Failed to start Modbus {} listener on '{}'", mode, endpoint));
   }
 
-  modbusLogger_->info("Started Modbus {} listener on '{}'", mode, endpoint);
+  logger_->info("Meter '{}' started Modbus {} listener on '{}'", name_, mode,
+                endpoint);
 
   return {};
 }
@@ -140,17 +143,17 @@ MeterSlave::handleResult(std::expected<void, ModbusError> &&result) {
   const ModbusError &err = result.error();
 
   if (err.severity == ModbusError::Severity::FATAL) {
-    modbusLogger_->error("FATAL Modbus error: {}", err.describe());
+    logger_->error("FATAL Modbus error: {}", err.describe());
     handler_.shutdown();
     return MeterTypes::ErrorAction::SHUTDOWN;
 
   } else if (err.severity == ModbusError::Severity::TRANSIENT) {
-    modbusLogger_->warn("Transient Modbus error: {}", err.describe());
+    logger_->warn("Transient Modbus error: {}", err.describe());
     return MeterTypes::ErrorAction::RECONNECT;
 
   } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
-    modbusLogger_->trace("Modbus operation cancelled due to shutdown: {}",
-                         err.describe());
+    logger_->trace("Modbus operation cancelled due to shutdown: {}",
+                   err.describe());
     return MeterTypes::ErrorAction::SHUTDOWN;
   }
 
@@ -159,7 +162,7 @@ MeterSlave::handleResult(std::expected<void, ModbusError> &&result) {
 
 void MeterSlave::updateValues(MeterTypes::Values values) {
   if (!handler_.isRunning()) {
-    modbusLogger_->error("updateValues(): Shutdown in progress");
+    logger_->error("updateValues(): Shutdown in progress");
     return;
   }
 
@@ -183,7 +186,7 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
   std::memcpy(newRegs->tab_registers, oldRegs->tab_registers,
               static_cast<size_t>(newRegs->nb_registers) * sizeof(uint16_t));
 
-  modbusLogger_->debug(
+  logger_->debug(
       "Meter values:\n"
       "  time              : {}\n"
       "  energy import : P={:.0f}Wh Q={:.0f}varh S={:.0f}VAh\n"
@@ -386,7 +389,7 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
 
 void MeterSlave::updateDevice(MeterTypes::Device device) {
   if (!handler_.isRunning()) {
-    modbusLogger_->error("updateDevice(): Shutdown in progress");
+    logger_->error("updateDevice(): Shutdown in progress");
     return;
   }
 
@@ -453,15 +456,15 @@ void MeterSlave::tcpClientWorker(int socket) {
   modbus_set_indication_timeout(ctx, cfg_.requestTimeout, 0);
 
   // Set libmodbus debug - enable only if logger is at trace level
-  if (modbusLogger_->level() == spdlog::level::trace) {
+  if (logger_->level() == spdlog::level::trace) {
     if (modbus_set_debug(ctx, true) == -1) {
-      modbusLogger_->warn("tcpClientWorker(): Unable to set debug flag");
+      logger_->warn("tcpClientWorker(): Unable to set debug flag");
     }
   }
 
   // Extract client connection information (IPv4 and IPv6 compatible)
   auto client = ModbusUtils::getSocketInfo(socket);
-  modbusLogger_->info("Client connected from {}:{}", client.ip, client.port);
+  logger_->info("Client connected from {}:{}", client.ip, client.port);
 
   uint8_t query[MODBUS_TCP_MAX_ADU_LENGTH];
 
@@ -485,22 +488,21 @@ void MeterSlave::tcpClientWorker(int socket) {
 
       auto replyStart = std::chrono::steady_clock::now();
       if (modbus_reply(ctx, query, rc, regs.get()) == -1) {
-        modbusLogger_->warn("tcpClientWorker(): Modbus reply failed: {}",
-                            modbus_strerror(errno));
+        logger_->warn("tcpClientWorker(): Modbus reply failed: {}",
+                      modbus_strerror(errno));
         break;
       }
-      if (modbusLogger_->level() == spdlog::level::trace) {
+      if (logger_->level() == spdlog::level::trace) {
         auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - replyStart);
-        modbusLogger_->trace("modbus_reply took {} µs", elapsed.count());
+        logger_->trace("modbus_reply took {} µs", elapsed.count());
       }
       continue;
     }
 
     // --- Empty frame (connection closed by client gracefully) ---
     if (rc == 0) {
-      modbusLogger_->info("Client {}:{} closed connection", client.ip,
-                          client.port);
+      logger_->info("Client {}:{} closed connection", client.ip, client.port);
       break;
     }
 
@@ -510,8 +512,8 @@ void MeterSlave::tcpClientWorker(int socket) {
     if (errno == ETIMEDOUT || errno == EAGAIN || errno == EWOULDBLOCK) {
       auto now = std::chrono::steady_clock::now();
       if (now - lastActivity > idleTimeout) {
-        modbusLogger_->info("Client {}:{} idle timeout ({}s), disconnecting",
-                            client.ip, client.port, cfg_.idleTimeout);
+        logger_->info("Client {}:{} idle timeout ({}s), disconnecting",
+                      client.ip, client.port, cfg_.idleTimeout);
         break;
       }
       continue;
@@ -523,8 +525,8 @@ void MeterSlave::tcpClientWorker(int socket) {
     }
 
     // Connection issue, protocol error or abrupt disconnection
-    modbusLogger_->info("Client {}:{} disconnected: {}", client.ip, client.port,
-                        modbus_strerror(errno));
+    logger_->info("Client {}:{} disconnected: {}", client.ip, client.port,
+                  modbus_strerror(errno));
     break;
   }
 
@@ -548,9 +550,9 @@ void MeterSlave::rtuClientHandler() {
   modbus_set_indication_timeout(listenCtx_, cfg_.requestTimeout, 0);
 
   // Set libmodbus debug - enable only if logger is at trace level
-  if (modbusLogger_->level() == spdlog::level::trace) {
+  if (logger_->level() == spdlog::level::trace) {
     if (modbus_set_debug(listenCtx_, true) == -1) {
-      modbusLogger_->warn("rtuClientHandler() Unable to set debug flag");
+      logger_->warn("rtuClientHandler() Unable to set debug flag");
     }
   }
 
@@ -567,10 +569,9 @@ void MeterSlave::rtuClientHandler() {
     // --- Valid request received ---
     if (rc > 0) {
       if (!isActive) {
-        modbusLogger_->info("Client connected (slave_id={}, "
-                            "request_timeout={}s, idle_timeout={}s)",
-                            cfg_.slaveId, cfg_.requestTimeout,
-                            cfg_.idleTimeout);
+        logger_->info("Client connected (slave_id={}, "
+                      "request_timeout={}s, idle_timeout={}s)",
+                      cfg_.slaveId, cfg_.requestTimeout, cfg_.idleTimeout);
         isActive = true;
       }
       lastActivity = std::chrono::steady_clock::now();
@@ -583,8 +584,8 @@ void MeterSlave::rtuClientHandler() {
       }
 
       if (modbus_reply(listenCtx_, query, rc, regs.get()) == -1) {
-        modbusLogger_->warn("rtuClientHandler(): reply failed: {}",
-                            modbus_strerror(errno));
+        logger_->warn("rtuClientHandler(): reply failed: {}",
+                      modbus_strerror(errno));
       }
       continue;
     }
@@ -600,8 +601,7 @@ void MeterSlave::rtuClientHandler() {
     if (errno == ETIMEDOUT || errno == EAGAIN || errno == EWOULDBLOCK) {
       auto now = std::chrono::steady_clock::now();
       if (now - lastActivity > idleTimeout && isActive) {
-        modbusLogger_->info("Client disconnected, idle for {}s",
-                            cfg_.idleTimeout);
+        logger_->info("Client disconnected, idle for {}s", cfg_.idleTimeout);
         lastActivity = now;
         isActive = false;
       }
@@ -621,11 +621,11 @@ void MeterSlave::rtuClientHandler() {
     }
 
     // Other errors - log and try to continue
-    modbusLogger_->debug("rtuClientHandler(): receive error: {}",
-                         modbus_strerror(errno));
+    logger_->debug("rtuClientHandler(): receive error: {}",
+                   modbus_strerror(errno));
   }
 
-  modbusLogger_->debug("Modbus RTU slave run loop stopped");
+  logger_->debug("Modbus RTU slave run loop stopped");
 }
 
 void MeterSlave::tcpClientHandler(void) {
@@ -672,8 +672,7 @@ void MeterSlave::tcpClientHandler(void) {
             break;
           continue;
         }
-        modbusLogger_->warn("tcpClientHandler(): accept failed: {}",
-                            strerror(errno));
+        logger_->warn("tcpClientHandler(): accept failed: {}", strerror(errno));
         continue;
       }
 
@@ -708,5 +707,5 @@ void MeterSlave::tcpClientHandler(void) {
     clientThreads_.clear();
   }
 
-  modbusLogger_->debug("Modbus TCP slave run loop stopped");
+  logger_->debug("Modbus TCP slave run loop stopped");
 }

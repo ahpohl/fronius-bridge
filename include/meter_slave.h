@@ -15,15 +15,31 @@
 
 class MeterSlave {
 public:
-  MeterSlave(const MeterSlaveConfig &cfg, SignalHandler &signalHandler);
+  MeterSlave(const MeterSlaveConfig &cfg, std::string meterName,
+             SignalHandler &signalHandler);
   virtual ~MeterSlave();
+
+  // Non-copyable, non-movable — owns threads and a server socket.
+  MeterSlave(const MeterSlave &) = delete;
+  MeterSlave &operator=(const MeterSlave &) = delete;
+  MeterSlave(MeterSlave &&) = delete;
+  MeterSlave &operator=(MeterSlave &&) = delete;
+
   void updateValues(MeterTypes::Values values);
   void updateDevice(MeterTypes::Device device);
   static constexpr int MODBUS_REGISTERS = 65535;
 
 private:
-  std::shared_ptr<spdlog::logger> modbusLogger_;
-  const MeterSlaveConfig &cfg_;
+  std::shared_ptr<spdlog::logger> logger_;
+  // Parent meter's name. Held by value: this slave outlives the YAML
+  // parse, and the parent meter's std::vector<MeterConfig> entry may
+  // relocate.
+  const std::string name_;
+  // Held by value (was reference) — with std::vector<MeterConfig> in
+  // AppConfig and the slave's config nested inside each entry, a stored
+  // reference would dangle on any vector reallocation. The config is
+  // small and copyable.
+  const MeterSlaveConfig cfg_;
   MeterTypes::ErrorAction
   handleResult(std::expected<void, ModbusError> &&result);
 

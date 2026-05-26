@@ -1,4 +1,7 @@
 #include "config_yaml.h"
+#include <format>
+#include <map>
+#include <regex>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <yaml-cpp/yaml.h>
@@ -187,7 +190,65 @@ static ResponseTimeoutConfig parseResponseTimeout(const YAML::Node &node) {
   return cfg;
 }
 
-// Shared logic for any Modbus master section (inverter or meter.master)
+// ---------------------------------------------------------------------------
+// Name validation
+//
+// Device names are used as MQTT topic segments (between the configured base
+// topic and the per-device suffixes such as `/values`, `/availability`) and
+// as logger names: each device's logger lookup chain tries `<name>.master`
+// or `<name>.slave` first, then `<name>` (so users can configure both
+// master and slave for a device with one YAML key), then the class-level
+// rung (`meter.master`, `meter.slave`, `inverter`), then the default.
+//
+// Restrict to a safe character set so names cannot break MQTT topics
+// (no '+', '#', '/') or surprise downstream consumers.
+//
+// Reserved literals fall into two groups:
+//   - MQTT-topic ambiguity: `meter`, `inverter` would produce a topic
+//     like `<base>/meter/meter/values` or `<base>/inverter/inverter/values`
+//     which is parseable but visually confusing for anyone reading the
+//     topic stream.
+//   - Logger-name collision: `master`, `slave`, `main`, `mqtt`, `bus`
+//     either shadow a built-in logger module (`main`, `mqtt`, `bus`) or
+//     produce a confusing combined logger name (a device named `master`
+//     would resolve to logger `master.master`).
+//
+// Throws messages prefixed with `:` so the calling parser prepends its own
+// section label (`inverters[0]`, `meters[1]`, …) via the surrounding
+// try/catch.
+// ---------------------------------------------------------------------------
+
+static void validateName(const std::string &name) {
+  if (name.empty())
+    throw std::invalid_argument(": .name must not be empty");
+  if (name.size() > 32)
+    throw std::invalid_argument(": .name must be 32 characters or fewer");
+
+  static const std::regex pattern("[A-Za-z0-9_-]+");
+  if (!std::regex_match(name, pattern))
+    throw std::invalid_argument(
+        ": .name must contain only [A-Za-z0-9_-] characters");
+
+  // The two-tier reserved-name check below mirrors the comment above.
+  if (name == "meter" || name == "inverter")
+    throw std::invalid_argument(
+        std::string(": .name '") + name +
+        "' is reserved (would produce a visually ambiguous topic of "
+        "the form <base>/" +
+        name + "/" + name + "/...)");
+
+  if (name == "master" || name == "slave" || name == "main" ||
+      name == "mqtt" || name == "bus")
+    throw std::invalid_argument(
+        std::string(": .name '") + name +
+        "' is reserved (would conflict with a built-in logger module or "
+        "produce an ambiguous combined logger name)");
+}
+
+// Shared logic for any Modbus master-role section (inverter or meter).
+// Fills the fields that InverterConfig and MeterConfig have in common;
+// the caller is responsible for `name` and any role-specific extras
+// (e.g. MeterConfig::slave).
 template <typename T> static T parseModbusMaster(const YAML::Node &node) {
   T cfg;
 
@@ -214,15 +275,27 @@ template <typename T> static T parseModbusMaster(const YAML::Node &node) {
 // Section parsers
 // ---------------------------------------------------------------------------
 
-static std::optional<InverterConfig> parseInverter(const YAML::Node &node) {
+static std::vector<InverterConfig> parseInverters(const YAML::Node &node) {
+  std::vector<InverterConfig> result;
   if (!node)
-    return std::nullopt;
+    return result;
 
-  try {
-    return parseModbusMaster<InverterConfig>(node);
-  } catch (const std::exception &e) {
-    throw std::runtime_error(std::string("inverter") + e.what());
+  if (!node.IsSequence())
+    throw std::runtime_error("inverters must be a sequence");
+
+  result.reserve(node.size());
+  for (std::size_t i = 0; i < node.size(); ++i) {
+    const auto prefix = std::format("inverters[{}]", i);
+    try {
+      auto cfg = parseModbusMaster<InverterConfig>(node[i]);
+      cfg.name = node[i]["name"].as<std::string>("");
+      validateName(cfg.name);
+      result.push_back(std::move(cfg));
+    } catch (const std::exception &e) {
+      throw std::runtime_error(prefix + e.what());
+    }
   }
+  return result;
 }
 
 static std::optional<MeterSlaveConfig> parseMeterSlave(const YAML::Node &node) {
@@ -243,33 +316,43 @@ static std::optional<MeterSlaveConfig> parseMeterSlave(const YAML::Node &node) {
   cfg.useFloatModel = node["use_float_model"].as<bool>(false);
 
   if (cfg.slaveId < 1 || cfg.slaveId > 247)
-    throw std::invalid_argument("meter.slave.unit_id must be in range 1-247");
+    throw std::invalid_argument(".unit_id must be in range 1-247");
   if (cfg.requestTimeout <= 0)
-    throw std::invalid_argument("meter.slave.request_timeout must be positive");
+    throw std::invalid_argument(".request_timeout must be positive");
   if (cfg.idleTimeout < cfg.requestTimeout)
-    throw std::invalid_argument(
-        "meter.slave.idle_timeout must be >= request_timeout");
+    throw std::invalid_argument(".idle_timeout must be >= request_timeout");
 
   return cfg;
 }
 
-static std::optional<MeterConfig> parseMeter(const YAML::Node &node) {
+static std::vector<MeterConfig> parseMeters(const YAML::Node &node) {
+  std::vector<MeterConfig> result;
   if (!node)
-    return std::nullopt;
+    return result;
 
-  MeterConfig cfg;
-  try {
-    cfg.master = parseModbusMaster<MeterMasterConfig>(node["master"]);
-  } catch (const std::exception &e) {
-    throw std::runtime_error(std::string("meter.master") + e.what());
-  }
-  try {
-    cfg.slave = parseMeterSlave(node["slave"]);
-  } catch (const std::exception &e) {
-    throw std::runtime_error(std::string("meter.slave") + e.what());
-  }
+  if (!node.IsSequence())
+    throw std::runtime_error("meters must be a sequence");
 
-  return cfg;
+  result.reserve(node.size());
+  for (std::size_t i = 0; i < node.size(); ++i) {
+    const auto prefix = std::format("meters[{}]", i);
+    try {
+      auto cfg = parseModbusMaster<MeterConfig>(node[i]);
+      cfg.name = node[i]["name"].as<std::string>("");
+      validateName(cfg.name);
+
+      try {
+        cfg.slave = parseMeterSlave(node[i]["slave"]);
+      } catch (const std::exception &e) {
+        throw std::runtime_error(std::string(".slave") + e.what());
+      }
+
+      result.push_back(std::move(cfg));
+    } catch (const std::exception &e) {
+      throw std::runtime_error(prefix + e.what());
+    }
+  }
+  return result;
 }
 
 static MqttConfig parseMqtt(const YAML::Node &node) {
@@ -343,32 +426,169 @@ static LoggerConfig parseLogger(const YAML::Node &node) {
 // Cross section validation
 // ---------------------------------------------------------------------------
 
-static void validateConfig(const AppConfig &cfg) {
-  // RTU device conflict: master and slave cannot share the same serial device
-  if (cfg.meter && cfg.meter->slave) {
-    const MeterMasterConfig &master = cfg.meter->master;
-    const MeterSlaveConfig &slave = *cfg.meter->slave;
+namespace {
 
-    if (master.rtu && slave.rtu && master.rtu->device == slave.rtu->device) {
-      throw std::runtime_error(
-          "meter.master and meter.slave cannot share the same RTU device");
+// Stable string identity for a bus (RTU device path, or TCP host:port).
+// Kept in sync with the lambda in main.cpp; if/when that is factored out
+// of main.cpp, this duplication goes away.
+std::string busKeyTcp(const ModbusTcpClientConfig &tcp) {
+  return tcp.host + ":" + std::to_string(tcp.port);
+}
+
+std::string busKeyRtu(const ModbusRtuConfig &rtu) { return rtu.device; }
+
+// A uniform view of a master-role device (inverter or meter) for the
+// purposes of cross-section validation. Pointers reference fields inside
+// the AppConfig that the surrounding validateConfig() call owns, so
+// DeviceRef must not outlive that call.
+struct DeviceRef {
+  std::string_view kind; // "inverter" or "meter"
+  std::size_t index;
+  std::string_view name;
+  const ModbusTcpClientConfig *tcp;
+  const ModbusRtuConfig *rtu;
+  int slaveId;
+};
+
+std::string describe(const DeviceRef &d) {
+  return std::format("{}[{}] ('{}')", d.kind, d.index, d.name);
+}
+
+std::string busKey(const DeviceRef &d) {
+  return d.rtu ? busKeyRtu(*d.rtu) : busKeyTcp(*d.tcp);
+}
+
+} // namespace
+
+static void validateConfig(const AppConfig &cfg) {
+  // --- Collect master-role devices in a uniform form ---
+  std::vector<DeviceRef> masters;
+  masters.reserve(cfg.inverters.size() + cfg.meters.size());
+
+  for (std::size_t i = 0; i < cfg.inverters.size(); ++i) {
+    const auto &c = cfg.inverters[i];
+    masters.push_back({"inverter", i, c.name, c.tcp ? &*c.tcp : nullptr,
+                       c.rtu ? &*c.rtu : nullptr, c.slaveId});
+  }
+  for (std::size_t i = 0; i < cfg.meters.size(); ++i) {
+    const auto &c = cfg.meters[i];
+    masters.push_back({"meter", i, c.name, c.tcp ? &*c.tcp : nullptr,
+                       c.rtu ? &*c.rtu : nullptr, c.slaveId});
+  }
+
+  // --- Name uniqueness across all master-role devices ---
+  // Names are used as MQTT topic segments and as logger suffixes;
+  // collisions between inverter and meter names would be ambiguous, so the
+  // scope is global rather than per-kind.
+  {
+    std::map<std::string, DeviceRef> byName;
+    for (const auto &d : masters) {
+      auto [it, inserted] = byName.try_emplace(std::string(d.name), d);
+      if (!inserted) {
+        throw std::runtime_error(std::format(
+            "duplicate device name '{}': {} and {}", d.name,
+            describe(it->second), describe(d)));
+      }
     }
   }
 
-  // RTU parameter conflict: inverter and meter.master may share a device
-  // path but must agree on all line parameters.
-  if (cfg.inverter && cfg.inverter->rtu && cfg.meter && cfg.meter->master.rtu &&
-      cfg.inverter->rtu->device == cfg.meter->master.rtu->device) {
-    const auto &ir = *cfg.inverter->rtu;
-    const auto &mr = *cfg.meter->master.rtu;
-    if (ir.baud != mr.baud || ir.dataBits != mr.dataBits ||
-        ir.stopBits != mr.stopBits || ir.parity != mr.parity) {
-      throw std::runtime_error(std::format(
-          "inverter and meter.master share RTU device '{}' but have "
-          "conflicting parameters: "
-          "inverter={} baud/{}-{}-{} vs meter={} baud/{}-{}-{}",
-          ir.device, ir.baud, ir.dataBits, parityToChar(ir.parity), ir.stopBits,
-          mr.baud, mr.dataBits, parityToChar(mr.parity), mr.stopBits));
+  // --- (busKey, slaveId) uniqueness across all master-role devices ---
+  // Catches e.g. two meters on /dev/ttyUSB0 both at unit_id 1.
+  {
+    std::map<std::pair<std::string, int>, DeviceRef> byBusSlave;
+    for (const auto &d : masters) {
+      auto key = std::make_pair(busKey(d), d.slaveId);
+      auto [it, inserted] = byBusSlave.try_emplace(key, d);
+      if (!inserted) {
+        throw std::runtime_error(std::format(
+            "{} and {} share bus '{}' and slave id {}",
+            describe(it->second), describe(d), key.first, key.second));
+      }
+    }
+  }
+
+  // --- RTU line-parameter consistency on shared bus ---
+  // First device on each RTU device path is the reference; subsequent devices
+  // on the same path must match. Validates all combinations
+  // (inverter+meter, inverter+inverter, meter+meter).
+  {
+    std::map<std::string, DeviceRef> rtuRef;
+    for (const auto &d : masters) {
+      if (!d.rtu)
+        continue;
+      auto [it, inserted] = rtuRef.try_emplace(d.rtu->device, d);
+      if (inserted)
+        continue;
+      const auto &r = *it->second.rtu;
+      const auto &o = *d.rtu;
+      if (r.baud != o.baud || r.dataBits != o.dataBits ||
+          r.stopBits != o.stopBits || r.parity != o.parity) {
+        throw std::runtime_error(std::format(
+            "{} and {} share RTU device '{}' but have conflicting line "
+            "parameters: {} baud/{}-{}-{} vs {} baud/{}-{}-{}",
+            describe(it->second), describe(d), r.device, r.baud, r.dataBits,
+            parityToChar(r.parity), r.stopBits, o.baud, o.dataBits,
+            parityToChar(o.parity), o.stopBits));
+      }
+    }
+  }
+
+  // --- Meter slave validation: TCP listen endpoint uniqueness ---
+  // Two slaves cannot bind the same (listen, port). Listing each slave's
+  // owning meter in the error makes the conflict locatable.
+  {
+    struct SlaveRef {
+      std::size_t meterIndex;
+      std::string_view meterName;
+    };
+    std::map<std::pair<std::string, int>, SlaveRef> byListen;
+    for (std::size_t i = 0; i < cfg.meters.size(); ++i) {
+      const auto &m = cfg.meters[i];
+      if (!m.slave || !m.slave->tcp)
+        continue;
+      auto key = std::make_pair(m.slave->tcp->listen, m.slave->tcp->port);
+      SlaveRef ref{i, m.name};
+      auto [it, inserted] = byListen.try_emplace(key, ref);
+      if (!inserted) {
+        throw std::runtime_error(std::format(
+            "meters[{}] ('{}').slave and meters[{}] ('{}').slave both listen "
+            "on {}:{}",
+            it->second.meterIndex, it->second.meterName, ref.meterIndex,
+            ref.meterName, key.first, key.second));
+      }
+    }
+  }
+
+  // --- RTU device exclusivity across master and slave roles ---
+  // No /dev/tty* may be used both as a master (anywhere) and as a slave
+  // (any meter), and no two slaves may share an RTU device. Two slaves on
+  // one wire is a Modbus impossibility (single-master bus); a master and a
+  // slave on the same wire would deadlock the bridge against itself.
+  {
+    std::map<std::string, std::string> masterUsage; // device -> owner desc
+    for (const auto &d : masters) {
+      if (d.rtu)
+        masterUsage.emplace(d.rtu->device, describe(d));
+    }
+    std::map<std::string, std::string> slaveUsage;
+    for (std::size_t i = 0; i < cfg.meters.size(); ++i) {
+      const auto &m = cfg.meters[i];
+      if (!m.slave || !m.slave->rtu)
+        continue;
+      const auto owner = std::format("meters[{}] ('{}').slave", i, m.name);
+
+      if (auto it = masterUsage.find(m.slave->rtu->device);
+          it != masterUsage.end()) {
+        throw std::runtime_error(std::format(
+            "RTU device '{}' is used by master {} and slave {}",
+            m.slave->rtu->device, it->second, owner));
+      }
+      auto [it, inserted] = slaveUsage.try_emplace(m.slave->rtu->device, owner);
+      if (!inserted) {
+        throw std::runtime_error(std::format(
+            "RTU device '{}' is used by two slaves: {} and {}",
+            m.slave->rtu->device, it->second, owner));
+      }
     }
   }
 }
@@ -381,12 +601,13 @@ AppConfig loadConfig(const std::string &path) {
   YAML::Node root = YAML::LoadFile(path);
   AppConfig cfg;
 
-  cfg.inverter = parseInverter(root["inverter"]);
-  cfg.meter = parseMeter(root["meter"]);
+  cfg.inverters = parseInverters(root["inverters"]);
+  cfg.meters = parseMeters(root["meters"]);
 
-  if (!cfg.inverter && !cfg.meter)
+  if (cfg.inverters.empty() && cfg.meters.empty())
     throw std::runtime_error(
-        "neither inverter nor meter configured, nothing to do");
+        "no devices configured (inverters and meters are both empty), "
+        "nothing to do");
 
   cfg.mqtt = parseMqtt(root["mqtt"]);
   cfg.logger = parseLogger(root["logger"]);

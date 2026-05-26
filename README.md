@@ -2,26 +2,28 @@
 
 # fronius-bridge
 
-fronius-bridge is a lightweight service that reads operational data from Fronius inverters and smart meters and publishes it to MQTT as JSON. It supports both Modbus TCP (IPv4/IPv6) and Modbus RTU (serial) connections.
+fronius-bridge is a lightweight service that reads operational data from one or more Fronius inverters and smart meters and publishes it to MQTT as JSON. It supports both Modbus TCP (IPv4/IPv6) and Modbus RTU (serial) connections, and serialises wire access for any devices that share a physical RS-485 bus.
 
 ## Features
 
+- Multiple inverters and meters per process, each identified by a configurable `name`
 - Reads inverter values such as power and energy
 - Reads smart meter values (Fronius TS65-a and SunSpec-compatible meters)
 - Supports Modbus over TCP (IPv4/IPv6) and serial RTU
+- Shared-bus support: any number of devices may share a single RS-485 dongle, with wire access serialised through a per-bus transaction queue
 - Manages night-time disconnections when the inverter enters standby and resumes publishing automatically
 - Publishes values, events, device info and connection availability as JSON to an MQTT broker
 - Fully configurable through a YAML configuration file
-- Extensive, module-scoped logging
+- Extensive, module-scoped logging with device-name-aware levels
 - Automatic detection of register model, number of phases, MPPT tracker inputs, and hybrid/storage capability
 
 ## Common topology
 
-The diagram below shows the recommended setup. `inverter.master` reads the Fronius inverter over Modbus TCP. `meter.master` reads the Fronius TS65-a smart meter directly over Modbus RTU via a USB RS-485 adapter using the proprietary register map. `meter.slave` re-serves the meter values back to the inverter as a SunSpec-compliant Modbus TCP server so the inverter can use the meter for feed-in management. Both masters publish to an external MQTT broker.
+The diagram below shows the simplest setup: one inverter on TCP, one meter on RS-485 served back to the inverter as a SunSpec endpoint. A real `inverters:` / `meters:` configuration can contain any number of devices, including several on a shared RS-485 dongle.
 
 ![Common topology](docs/topology-common.svg)
 
-The `inverter` and `meter` sections are both optional — at least one must be configured. Other supported configurations are described under [Supported topologies](#supported-topologies).
+Both `inverters:` and `meters:` are optional sequences; at least one device across the two must be configured. See [Supported topologies](#supported-topologies) for the other variants.
 
 ## Status and limitations
 
@@ -38,33 +40,16 @@ The `inverter` and `meter` sections are both optional — at least one must be c
 
 ## Configuration
 
-fronius-bridge is configured via a YAML file passed with `-c <path>` (or the `FRONIUS_CONFIG` environment variable). The `inverter` and `meter` sections are both optional, but at least one must be present.
+fronius-bridge is configured via a YAML file passed with `-c <path>` (or the `FRONIUS_CONFIG` environment variable). The `inverters:` and `meters:` keys are sequences (YAML lists); each may be empty or omitted, but at least one device across the two must be configured.
 
 ### Example config
 
 ```yaml
-inverter:
-  tcp:
-    host: primo.home.arpa
-    port: 502
-  unit_id: 1
-  response_timeout:
-    sec: 5
-    usec: 0
-  update_interval: 4
-  reconnect_delay:
-    min: 5
-    max: 320
-    exponential: true
-
-meter:
-  master:
-    rtu:
-      device: /dev/ttyUSB0
-      baud: 9600
-      data_bits: 8
-      stop_bits: 1
-      parity: none
+inverters:
+  - name: primo
+    tcp:
+      host: primo.home.arpa
+      port: 502
     unit_id: 1
     response_timeout:
       sec: 5
@@ -74,12 +59,44 @@ meter:
       min: 5
       max: 320
       exponential: true
-  slave:
+
+meters:
+  - name: heatpump
+    rtu:
+      device: /dev/ttyUSB0
+      baud: 9600
+      data_bits: 8
+      stop_bits: 1
+      parity: none
+    unit_id: 2
+    response_timeout:
+      sec: 5
+      usec: 0
+    update_interval: 4
+    reconnect_delay:
+      min: 5
+      max: 320
+      exponential: true
+    slave:
+      tcp:
+        listen: 0.0.0.0
+        port: 503
+      unit_id: 1
+      use_float_model: false
+
+  - name: grid
     tcp:
-      listen: 0.0.0.0
+      host: primo.home.arpa
       port: 502
-    unit_id: 1
-    use_float_model: false
+    unit_id: 240
+    response_timeout:
+      sec: 5
+      usec: 0
+    update_interval: 4
+    reconnect_delay:
+      min: 5
+      max: 320
+      exponential: true
 
 mqtt:
   broker: localhost
@@ -97,81 +114,95 @@ logger:
   level: info
   modules:
     main: info
-    inverter: info
     mqtt: info
-    meter:
+    bus: info
+    primo: info
+    heatpump:
       master: info
       slave: info
+    grid: info
 ```
 
 ### Configuration reference
 
-**Transport fields** (shared by `inverter`, `meter.master`, and `meter.slave`):
+**Per-device fields** (each entry in `inverters:` and `meters:`):
 
-- tcp / rtu: Configure exactly one transport per section.
-  - tcp.host *(master only)*: Hostname or IP (IPv4/IPv6) of the remote device.
-  - tcp.listen *(slave only)*: Bind address for the listener. Use `0.0.0.0` for all IPv4 interfaces (default).
-  - tcp.port: Modbus TCP port (default: 502). For slave mode this is the local listening port.
-  - rtu.device: Serial device path (e.g. `/dev/ttyUSB0`).
+- name: Device identifier used in MQTT topics (`<topic>/inverter/<name>/...` or `<topic>/meter/<name>/...`) and as a logger module. Mandatory. Must be unique across all inverters and meters combined. Constrained to `[A-Za-z0-9_-]+` and at most 32 characters. The literals `meter`, `inverter`, `master`, `slave`, `main`, `mqtt`, and `bus` are reserved.
+- tcp / rtu: Configure exactly one transport per device.
+  - tcp.host: Hostname or IP (IPv4/IPv6) of the remote device.
+  - tcp.port: Modbus TCP port (default: 502).
+  - rtu.device: Serial device path (e.g. `/dev/ttyUSB0`). Devices that share the same path share an underlying transaction queue; see [Supported topologies](#supported-topologies).
   - rtu.baud: Baud rate (e.g. 9600, 19200, 38400).
   - rtu.data_bits / rtu.stop_bits: Data bits (5–8) and stop bits (1–2).
   - rtu.parity: `none`, `even`, or `odd`.
-- unit_id: Modbus unit/slave ID of the remote device (typically 1).
+- unit_id: Modbus unit/slave ID of the remote device (1–247).
 - response_timeout.sec / .usec: Response timeout — total = sec + usec. Increase on slow links.
 - update_interval: Polling interval in seconds.
 - reconnect_delay.min / .max / .exponential: Reconnect backoff. `exponential: true` ramps from min to max; `false` uses a fixed delay equal to min.
 
-**inverter** *(optional)*: Connects to the Fronius inverter. Fields are the transport fields above.
+**inverters** *(optional sequence)*: Each entry is one Fronius inverter, identified by `name`. Per-device fields apply.
 
-**meter** *(optional)*:
-- master: Reads meter register data. Required when `meter` is configured. Two register models are auto-detected on connect — no manual selection needed:
+**meters** *(optional sequence)*: Each entry is one smart meter, identified by `name`. Per-device fields apply. Two register models are auto-detected on connect — no manual selection needed:
   - *Fronius TS65-a proprietary* — direct RTU connection to a TS65-a smart meter.
-  - *SunSpec* — all other cases: meter proxied via the inverter's TCP interface (use `unit_id: 240` for the primary meter, 241 for secondary), or any standalone SunSpec-compatible meter.
-- slave *(optional)*: Exposes a SunSpec-compliant Modbus server so the inverter or another master can read meter values from fronius-bridge. Either TCP or RTU may be used; for the standard Fronius use case, configure TCP. Requires `meter.master` to be configured. `meter.master` and `meter.slave` may not share the same RTU device.
-  - request_timeout: Seconds to wait for a request before considering the session stalled.
-  - idle_timeout: Seconds of inactivity after which the client is treated as gone. In TCP mode the idle client is disconnected; in RTU mode the listener keeps running and simply marks the client inactive in the log.
-  - use_float_model: `false` (default) exposes int+sf registers (Fronius-compatible); `true` exposes 32-bit IEEE 754 float registers.
+  - *SunSpec* — all other cases: meter proxied via an inverter's TCP interface (use `unit_id: 240` for the primary meter, 241 for secondary), or any standalone SunSpec-compatible meter.
+
+Each meter entry may additionally carry a nested `slave:` block which exposes a SunSpec-compliant Modbus server so the inverter or another master can read this meter's values from fronius-bridge. Either TCP or RTU may be used; for the standard Fronius use case, configure TCP. The slave's RTU device path (if used) may not match any master's RTU device, and no two slaves may share an RTU device — both checks are enforced at config-load.
+
+Slave fields:
+- tcp.listen: Bind address for the listener. Use `0.0.0.0` for all IPv4 interfaces (default).
+- tcp.port: Local listening port. Distinct slaves must bind distinct (listen, port) pairs.
+- unit_id: Modbus unit/slave ID to advertise to clients.
+- request_timeout: Seconds to wait for a request before considering the session stalled.
+- idle_timeout: Seconds of inactivity after which the client is treated as gone. In TCP mode the idle client is disconnected; in RTU mode the listener keeps running and simply marks the client inactive in the log.
+- use_float_model: `false` (default) exposes int+sf registers (Fronius-compatible); `true` exposes 32-bit IEEE 754 float registers.
 
 **mqtt**: Connection to the MQTT broker.
 - broker / port: Broker hostname and port (1883 unencrypted, 8883 TLS).
-- topic: Base topic — subtopics (`/inverter/values`, `/meter/values`, etc.) are appended automatically.
+- topic: Base topic — subtopics (`/<class>/<name>/values`, etc.) are appended automatically. See [MQTT publishing](#mqtt-publishing).
 - user / password: Optional broker authentication.
 - queue_size: Per-topic publish queue depth. Messages beyond this limit are dropped.
-- reconnect_delay: Same semantics as inverter.reconnect_delay.
+- reconnect_delay: Same semantics as the per-device `reconnect_delay`.
 
 **logger**:
 - level: Global default — `off`, `error`, `warn`, `info`, `debug`, `trace`.
-- modules: Per-module overrides using the same level values. Module keys: `main`, `inverter`, `mqtt`, `meter.master`, `meter.slave`. Use `debug` or `trace` when diagnosing connectivity issues; `trace` produces verbose frame dumps.
+- modules: Per-module overrides using the same level values. Each device's logger resolves through a fallback chain so you can target levels with whichever granularity suits the situation: Setting `heatpump: info` therefore covers both the master and the slave of a meter named `heatpump`; split them with `heatpump.master:` / `heatpump.slave:` when wanted.
+- the flat `key.subkey: value` form and the nested `key: { subkey: value }` form are equivalent — pick whichever reads better.
 
 ## Supported topologies
 
-**Inverter only** — omit the `meter` section. Reach the inverter over TCP or RTU.
+**Inverter(s) only** — leave `meters:` empty or omitted. Configure one or more entries under `inverters:`. Each is reached over TCP or RTU.
 
-**Meter only** — omit the `inverter` section. Useful for standalone meter monitoring.
+**Meter(s) only** — leave `inverters:` empty or omitted. Useful for standalone meter monitoring.
 
-**Meter behind inverter (TCP proxy)** — configure `meter.master` with TCP pointing at the inverter's IP and `unit_id: 240` (primary meter per the Fronius Datamanager specification; secondary starts at 241). The inverter proxies register requests to the meter on its internal RS-485 port over SunSpec. No USB dongle required, and `meter.slave` is unnecessary since the inverter already has direct meter access.
+**Meter behind inverter (TCP proxy)** — configure a meter entry with TCP pointing at the inverter's IP and `unit_id: 240` (primary meter per the Fronius Datamanager specification; secondary starts at 241). The inverter proxies register requests to the meter on its internal RS-485 port over SunSpec. No USB dongle required, and no `slave:` block is needed since the inverter already has direct meter access.
 
-**Meter slave without inverter** — `meter.slave` can operate without `inverter` configured. fronius-bridge reads the meter via `meter.master` and serves the values over TCP (or RTU) to any Modbus master that connects.
+**Meter slave without inverter** — a meter entry with a `slave:` block can operate without any inverter configured. fronius-bridge reads the meter directly and serves the values over TCP (or RTU) to any Modbus master that connects.
 
-**Shared RTU bus** — `inverter.master` and `meter.master` may share the same physical serial dongle by setting both `inverter.rtu.device` and `meter.master.rtu.device` to the same path (e.g. `/dev/ttyUSB0`). fronius-bridge serializes all wire access on a shared device through a single transaction queue, so the inverter and meter are polled in turn rather than concurrently. When sharing, all RTU line parameters (`baud`, `data_bits`, `stop_bits`, `parity`) must match across the two sections; configurations with conflicting parameters are rejected at startup. The two devices must use different `unit_id` values.
+**Shared RTU bus** — any number of inverter and meter entries may share the same physical serial dongle by setting their `rtu.device` to the same path (e.g. `/dev/ttyUSB0`). fronius-bridge serialises all wire access on a shared device through a single transaction queue, so devices are polled in turn rather than concurrently. When sharing, all RTU line parameters (`baud`, `data_bits`, `stop_bits`, `parity`) must match across the sharing devices and the `unit_id` values must be distinct; both checks are enforced at config-load. Per-device `reconnect_delay` settings on a shared bus are aggregated to a single bus-level policy by taking the minimum `min`, the minimum `max`, and OR-ing the `exponential` flags.
+
+**Multiple devices of either kind** — `inverters:` and `meters:` are sequences, so any combination of devices is supported. Each entry carries its own `name`, transport, and (for meters) optional `slave:` block. MQTT topics route per-device through the `<class>/<name>` segments — see [MQTT publishing](#mqtt-publishing).
 
 ## MQTT publishing
 
 Messages are published as JSON under the configured base topic. QoS 1, retained. Consecutive duplicate payloads per topic are suppressed.
 
-| Component | Subtopic                        | Content                         |
-|-----------|---------------------------------|---------------------------------|
-| Inverter  | `<topic>/inverter/values`       | Telemetry (power, energy, etc.) |
-| Inverter  | `<topic>/inverter/events`       | Faults and alarms               |
-| Inverter  | `<topic>/inverter/device`       | Static device metadata          |
-| Inverter  | `<topic>/inverter/availability` | `connected` or `disconnected`   |
-| Meter     | `<topic>/meter/values`          | Telemetry (power, energy, etc.) |
-| Meter     | `<topic>/meter/device`          | Static device metadata          |
-| Meter     | `<topic>/meter/availability`    | `connected` or `disconnected`   |
+Each topic carries both a device class segment (`inverter` or `meter`) and the device's `name`, giving consumers two natural wildcards: `<topic>/inverter/+/values` matches every inverter's telemetry, and `<topic>/+/<name>/values` matches every value publish for a specifically-named device regardless of class.
+
+| Component | Subtopic                                  | Content                         |
+|-----------|-------------------------------------------|---------------------------------|
+| Inverter  | `<topic>/inverter/<name>/values`          | Telemetry (power, energy, etc.) |
+| Inverter  | `<topic>/inverter/<name>/events`          | Faults and alarms               |
+| Inverter  | `<topic>/inverter/<name>/device`          | Static device metadata          |
+| Inverter  | `<topic>/inverter/<name>/availability`    | `connected` or `disconnected`   |
+| Meter     | `<topic>/meter/<name>/values`             | Telemetry (power, energy, etc.) |
+| Meter     | `<topic>/meter/<name>/device`             | Static device metadata          |
+| Meter     | `<topic>/meter/<name>/availability`       | `connected` or `disconnected`   |
+
+For example, with `mqtt.topic: fronius-bridge` and a meter named `heatpump`, the telemetry topic is `fronius-bridge/meter/heatpump/values`.
 
 ### Example payloads
 
-- Topic: `<topic>/inverter/values`
+- Topic: `<topic>/inverter/<name>/values`
   ```jsonc
   {
     "time": 1762607887640,
@@ -191,12 +222,12 @@ Messages are published as JSON under the configured base topic. QoS 1, retained.
   }
   ```
 
-- Topic: `<topic>/inverter/events`
+- Topic: `<topic>/inverter/<name>/events`
   ```json
   { "active_code": 0, "state": "Tracking power point", "events": [] }
   ```
 
-- Topic: `<topic>/inverter/device`
+- Topic: `<topic>/inverter/<name>/device`
   ```jsonc
   {
     "manufacturer": "Fronius", "model": "Primo 4.0-1", "serial_number": "34119102",
@@ -206,7 +237,7 @@ Messages are published as JSON under the configured base topic. QoS 1, retained.
   }
   ```
 
-- Topic: `<topic>/meter/values`
+- Topic: `<topic>/meter/<name>/values`
   ```jsonc
   {
     "time": 1762607887640,
@@ -226,7 +257,7 @@ Messages are published as JSON under the configured base topic. QoS 1, retained.
   }
   ```
 
-- Topic: `<topic>/meter/device`
+- Topic: `<topic>/meter/<name>/device`
   ```jsonc
   {
     "manufacturer": "Fronius", "model": "TS65-a-3", "serial_number": "12345678",
@@ -318,14 +349,15 @@ Energy counters (`energy_*`) are cumulative values maintained by the physical me
 ## Troubleshooting
 
 - **Connection timeouts** — increase `response_timeout` or `update_interval`. Verify `unit_id` and transport match the device.
-- **Meter register model not detected** — check `meter.master` log at `debug` level; the detected model is logged on connect.
-- **Meter slave not responding to inverter** — verify `meter.slave.unit_id` matches what the inverter queries, and that `use_float_model: false` (Fronius inverters require int+sf).
+- **Meter register model not detected** — set the device-level logger to `debug` (e.g. `heatpump: debug`); the detected model is logged on connect.
+- **Meter slave not responding to inverter** — verify the meter's `slave.unit_id` matches what the inverter queries, and that `use_float_model: false` (Fronius inverters require int+sf).
+- **Shared bus diagnostics** — set `bus: debug` in `logger.modules` to see per-transaction tx/rx activity, queue depth, and slave-switch events.
 - **Frequent MQTT reconnects** — check broker reachability, credentials, and `mqtt.reconnect_delay`.
 
 ## Security
 
 - Prefer running MQTT behind a trusted network or VPN. If using authentication, set `mqtt.user`/`mqtt.password` and restrict the config file with `chmod 0600`.
-- Binding `meter.slave.tcp.port` to a port below 1024 requires elevated privileges or `CAP_NET_BIND_SERVICE`.
+- Binding a meter's `slave.tcp.port` to a port below 1024 requires elevated privileges or `CAP_NET_BIND_SERVICE`. Use `--user`/`--group` to drop privileges after startup once the listener is bound.
 
 ## License
 

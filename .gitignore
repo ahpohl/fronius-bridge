@@ -10,3 +10,6 @@ deploy.sh
 .cproject
 .settings/
 .metadata/
+
+# patches
+*.patch

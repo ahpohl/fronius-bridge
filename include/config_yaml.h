@@ -6,6 +6,7 @@
 #include <spdlog/spdlog.h>
 #include <string>
 #include <termios.h>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // Serial types
@@ -60,30 +61,12 @@ struct ResponseTimeoutConfig {
 };
 
 // ---------------------------------------------------------------------------
-// Inverter config
+// Meter slave config
+//
+// Optional per-meter SunSpec endpoint that mirrors the meter's live values
+// onto a Modbus slave (typically TCP). The parent meter is the data source;
+// this struct only describes how to serve it.
 // ---------------------------------------------------------------------------
-
-struct InverterConfig {
-  std::optional<ModbusTcpClientConfig> tcp;
-  std::optional<ModbusRtuConfig> rtu;
-  int slaveId{1};
-  ResponseTimeoutConfig responseTimeout;
-  int updateInterval{4};
-  ReconnectDelayConfig reconnectDelay;
-};
-
-// ---------------------------------------------------------------------------
-// Meter configs
-// ---------------------------------------------------------------------------
-
-struct MeterMasterConfig {
-  std::optional<ModbusTcpClientConfig> tcp;
-  std::optional<ModbusRtuConfig> rtu;
-  int slaveId{1};
-  ResponseTimeoutConfig responseTimeout;
-  int updateInterval{4};
-  ReconnectDelayConfig reconnectDelay;
-};
 
 struct MeterSlaveConfig {
   std::optional<ModbusTcpServerConfig> tcp;
@@ -94,8 +77,36 @@ struct MeterSlaveConfig {
   bool useFloatModel{false};
 };
 
+// ---------------------------------------------------------------------------
+// Inverter config (one entry per physical inverter)
+// ---------------------------------------------------------------------------
+
+struct InverterConfig {
+  std::string name;
+  std::optional<ModbusTcpClientConfig> tcp;
+  std::optional<ModbusRtuConfig> rtu;
+  int slaveId{1};
+  ResponseTimeoutConfig responseTimeout;
+  int updateInterval{4};
+  ReconnectDelayConfig reconnectDelay;
+};
+
+// ---------------------------------------------------------------------------
+// Meter config (one entry per physical meter)
+//
+// The optional `slave` block, if present, makes this meter's live values
+// available on a SunSpec Modbus endpoint (typically used to feed a Fronius
+// inverter for export limiting).
+// ---------------------------------------------------------------------------
+
 struct MeterConfig {
-  MeterMasterConfig master;
+  std::string name;
+  std::optional<ModbusTcpClientConfig> tcp;
+  std::optional<ModbusRtuConfig> rtu;
+  int slaveId{1};
+  ResponseTimeoutConfig responseTimeout;
+  int updateInterval{4};
+  ReconnectDelayConfig reconnectDelay;
   std::optional<MeterSlaveConfig> slave;
 };
 
@@ -127,8 +138,8 @@ struct LoggerConfig {
 // ---------------------------------------------------------------------------
 
 struct AppConfig {
-  std::optional<InverterConfig> inverter;
-  std::optional<MeterConfig> meter;
+  std::vector<InverterConfig> inverters;
+  std::vector<MeterConfig> meters;
   MqttConfig mqtt;
   LoggerConfig logger;
 };
