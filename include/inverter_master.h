@@ -60,18 +60,14 @@ private:
 
   std::shared_ptr<FroniusBus> bus_;
   std::shared_ptr<Inverter> inverter_;
-  // Held by value — with std::vector<InverterConfig> in AppConfig, a
-  // reference would dangle on vector reallocation. The config is small
-  // and copyable.
+  // Held by value: AppConfig's std::vector<InverterConfig> may reallocate.
   const InverterConfig cfg_;
   std::shared_ptr<spdlog::logger> logger_;
 
-  // IDs of bus-level callbacks this master has registered. Removed in
-  // the destructor before any state captured by those callbacks (this,
-  // modbusLogger_, handler_) is torn down. With a shared bus, the bus
-  // thread can outlive any individual master; leaving the callbacks
-  // attached would be a use-after-free hazard the next time the bus
-  // fired one.
+  // Bus-level callback IDs registered by this master. The destructor
+  // removes them before tearing down state captured by their lambdas
+  // (this, logger_, handler_), since the bus thread may outlive any
+  // individual master on a shared bus.
   std::vector<FroniusBus::CallbackId> busCallbackIds_;
 
   // --- values and events ---

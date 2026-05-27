@@ -197,8 +197,7 @@ static ResponseTimeoutConfig parseResponseTimeout(const YAML::Node &node) {
 // topic and the per-device suffixes such as `/values`, `/availability`) and
 // as logger names: each device's logger lookup chain tries `<name>.master`
 // or `<name>.slave` first, then `<name>` (so users can configure both
-// master and slave for a device with one YAML key), then the class-level
-// rung (`meter.master`, `meter.slave`, `inverter`), then the default.
+// master and slave for a device with one YAML key), then the default.
 //
 // Restrict to a safe character set so names cannot break MQTT topics
 // (no '+', '#', '/') or surprise downstream consumers.

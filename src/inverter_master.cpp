@@ -32,10 +32,6 @@ InverterMaster::InverterMaster(const InverterConfig &cfg,
   bus_->registerDevice(inverter_);
 
   // --- Bus-level callbacks ---
-  //
-  // The returned CallbackId for each is stored so the destructor can
-  // remove it from the bus before any of the lambdas' captured state
-  // (this,logger_, handler_) is destroyed.
 
   busCallbackIds_.push_back(bus_->addBusConnectCallback([this] {
     if (cfg_.tcp) {
@@ -104,34 +100,24 @@ InverterMaster::InverterMaster(const InverterConfig &cfg,
                   delay, delay == 1 ? "second" : "seconds");
   });
 
-  // NOTE: bus_->connect() is intentionally NOT called here. With shared
-  // buses, main() is responsible for calling connect() exactly once per bus
-  // after every master sharing that bus has constructed and registered its
-  // callbacks. Calling connect() from each master would race with later
-  // masters' callback registrations — the bus could connect (and fire its
-  // onBusConnect_ callbacks) before subsequent masters had added theirs.
+  // NOTE: bus_->connect() is intentionally NOT called here. On a shared
+  // bus, main() calls connect() once after every master has constructed
+  // and registered its callbacks; connecting from each master would race
+  // with later masters' registrations.
 
-  // Start update loop thread. It is harmless until the bus connects: the
-  // loop's body only runs when connected_ flips true, which the device-ready
-  // callback above does, which only fires after bus->connect() + validation.
+  // Start update loop thread. The loop body only runs once connected_
+  // flips true, which the device-ready callback above does after
+  // bus->connect() + validation.
   worker_ = std::thread(&InverterMaster::runLoop, this);
 }
 
 InverterMaster::~InverterMaster() {
-  // Tell the bus to stop calling into us, in two parts:
-  //
-  //   1. unregisterDevice removes us from the bus's device registry and
-  //      cancels any in-flight per-device retry loop, so the bus stops
-  //      walking the registry to call into a soon-to-die object.
-  //
-  //   2. removeBusCallback synchronously removes each bus-level callback
-  //      we registered. It waits for the bus thread to finish any
-  //      in-flight invocation of those callbacks, so the lambdas
-  //      capturing [this],logger_, and handler_ are guaranteed
-  //      not to run again before we destroy that state.
-  //
-  // If the bus outlives us (another master sharing it is still holding
-  // a reference), it continues to serve other devices uninterrupted.
+  // Detach from the bus before tearing down state that its callbacks
+  // capture: unregisterDevice cancels any in-flight per-device retry
+  // loop, and removeBusCallback synchronously waits for the bus thread
+  // to finish any in-flight invocation of each callback. If the bus
+  // outlives us (another master sharing it still holds a reference),
+  // it continues to serve other devices uninterrupted.
   if (bus_) {
     if (inverter_)
       bus_->unregisterDevice(inverter_.get());

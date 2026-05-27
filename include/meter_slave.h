@@ -32,13 +32,10 @@ public:
 private:
   std::shared_ptr<spdlog::logger> logger_;
   // Parent meter's name. Held by value: this slave outlives the YAML
-  // parse, and the parent meter's std::vector<MeterConfig> entry may
-  // relocate.
+  // parse, and the parent's std::vector<MeterConfig> entry may relocate.
   const std::string name_;
-  // Held by value (was reference) — with std::vector<MeterConfig> in
-  // AppConfig and the slave's config nested inside each entry, a stored
-  // reference would dangle on any vector reallocation. The config is
-  // small and copyable.
+  // Held by value: AppConfig's std::vector<MeterConfig> may reallocate,
+  // which would dangle any reference into a nested slave config.
   const MeterSlaveConfig cfg_;
   MeterTypes::ErrorAction
   handleResult(std::expected<void, ModbusError> &&result);

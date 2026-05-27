@@ -1,10 +1,12 @@
 # ================================
 # fronius-bridge — configuration
 # ================================
-
-# Each entry in `inverters:` and `meters:` is one physical device. Both
-# sections are sequences (YAML lists), each list may be empty or omitted,
-# but at least one device across the two must be configured.
+#
+# Example devices:
+# ----------------
+# 1. Fronius Primo 4.0 inverter
+# 2. Primary grid EBZ Easymeter
+# 3. Secondary Fronius TS 65a-3 meter only for heat pump
 
 inverters:
   - name: primo
@@ -12,18 +14,20 @@ inverters:
       host: primo.home.arpa
       port: 502
     unit_id: 1
-    response_timeout:
-      sec: 5
-      usec: 0
+    response_timeout: { sec: 5, usec: 0 }
     update_interval: 4
-    reconnect_delay:
-      min: 5
-      max: 320
-      exponential: true
+    reconnect_delay: { min: 5, max: 320, exponential: true }
 
 meters:
-  # The Fronius TS65-a smart meter, read directly over RS-485 and re-served
-  # back to the inverter as a SunSpec endpoint via `slave:`.
+  - name: grid
+    tcp:
+      host: localhost
+      port: 502
+    unit_id: 1
+    response_timeout: { sec: 5, usec: 0 }
+    update_interval: 2
+    reconnect_delay: { min: 5, max: 320, exponential: true }
+
   - name: heatpump
     rtu:
       device: /dev/ttyUSB0
@@ -32,14 +36,9 @@ meters:
       stop_bits: 1
       parity: none
     unit_id: 2
-    response_timeout:
-      sec: 5
-      usec: 0
-    update_interval: 4
-    reconnect_delay:
-      min: 5
-      max: 320
-      exponential: true
+    response_timeout: { sec: 5, usec: 0 }
+    update_interval: 2
+    reconnect_delay: { min: 5, max: 320, exponential: true }
     slave:
       tcp:
         listen: 0.0.0.0
@@ -47,47 +46,23 @@ meters:
       unit_id: 1
       use_float_model: false
 
-  # The grid meter proxied through the inverter's TCP interface, no
-  # USB dongle required. Uses the SunSpec register model (auto-detected).
-  - name: grid
-    tcp:
-      host: primo.home.arpa
-      port: 502
-    unit_id: 240
-    response_timeout:
-      sec: 5
-      usec: 0
-    update_interval: 4
-    reconnect_delay:
-      min: 5
-      max: 320
-      exponential: true
-
 mqtt:
   broker: localhost
   port: 1883
   topic: fronius-bridge
   #user: mqtt
-  #password: "your-secret-password"
+  #password: "your very secure password"
   queue_size: 100
-  reconnect_delay:
-    min: 2
-    max: 64
-    exponential: true
+  reconnect_delay: { min: 2, max: 64, exponential: true }
 
 logger:
-  # Default level for any logger not explicitly listed under `modules`.
   level: info
   modules:
-    # Built-in modules
     main: info
+    bus: info
     mqtt: info
-    bus: info        # set to `debug` or `trace` to see per-bus tx/rx diagnostics
-
-    # Per-device modules: each device's logger lookup tries
-    #   <name>.master / <name>.slave  ->  <name>  ->  meter.master / meter.slave / inverter
-    # so any of the keys below would work. Pick whichever granularity suits.
     primo: info
-    heatpump: info             # applies to both the meter master and its slave
-    heatpump.slave: info       # uncomment to override just the slave role
     grid: info
+    heatpump:
+      master: info
+      slave: info
