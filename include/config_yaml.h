@@ -1,6 +1,7 @@
 #ifndef CONFIG_YAML_HPP
 #define CONFIG_YAML_HPP
 
+#include <fronius/modbus_config.h>
 #include <map>
 #include <optional>
 #include <spdlog/spdlog.h>
@@ -178,6 +179,38 @@ struct LoggerConfig {
 };
 
 // ---------------------------------------------------------------------------
+// Derived bus registry
+// ---------------------------------------------------------------------------
+
+// One device's place on a shared bus, for the startup summary / diagnostics.
+struct BusMember {
+  std::string name;
+  int slaveId;
+};
+
+// A derived bus: the deduplicated libfronius config for one physical bus
+// (RS-485 device or TCP endpoint) plus the devices that share it. Synthesised
+// by loadConfig() from the inverter and meter sections — there is no [buses]
+// YAML section — with reconnect-delay aggregated across the sharing devices.
+// Holds config only; it opens no hardware (FroniusBus is built from it later).
+struct BusInfo {
+  ModbusBusConfig config;
+  std::vector<BusMember> members;
+};
+
+// Bus key (stable string identity) a device's transport maps to: RTU device
+// path, or TCP "host:port". Two devices with the same key share one bus. The
+// meter overload returns nullopt for non-bus kinds (the EBZ Easymeter, which
+// owns a dedicated serial line and never joins the shared bus). Used by main
+// to look a device up in the derived bus registry.
+std::optional<std::string> busKeyOf(const MeterConfig &m);
+std::string busKeyOf(const InverterConfig &i);
+
+// Human-readable transport descriptor for the startup summary, e.g.
+// "RTU 9600 8N1" or "TCP". Reconnect policy is deliberately omitted.
+std::string busTransportLabel(const ModbusBusConfig &cfg);
+
+// ---------------------------------------------------------------------------
 // Root config
 // ---------------------------------------------------------------------------
 
@@ -186,6 +219,12 @@ struct AppConfig {
   std::vector<MeterConfig> meters;
   MqttConfig mqtt;
   LoggerConfig logger;
+
+  // Derived, not parsed: the deduplicated bus registry synthesised from
+  // `inverters` and `meters` by loadConfig() (there is no [buses] YAML
+  // section). Keyed by bus key (see busKeyOf). main builds one FroniusBus
+  // per entry.
+  std::map<std::string, BusInfo> buses;
 };
 
 AppConfig loadConfig(const std::string &path);

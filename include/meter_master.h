@@ -18,7 +18,7 @@
 //   - device callback:       device identity / nameplate (MeterTypes::Device)
 //   - availability callback: a connectivity state string
 //
-// Concrete subclasses (FroniusMeterMaster, EasyMeterMaster) implement the
+// Concrete subclasses (FroniusMeter, EasyMeter) implement the
 // transport and their own worker thread; they invoke the stored callbacks
 // when fresh data arrives. main.cpp holds masters through this base so the
 // callback-wiring is identical regardless of meter kind.

@@ -99,8 +99,8 @@ set(SRC_FILES
     src/inverter_master.cpp
     src/config_yaml.cpp
     src/mqtt_client.cpp
-    src/fronius_meter_master.cpp
-    src/easy_meter_master.cpp
+    src/fronius_meter.cpp
+    src/easy_meter.cpp
     src/meter_slave.cpp
 )
 

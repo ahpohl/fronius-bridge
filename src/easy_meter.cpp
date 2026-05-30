@@ -1,4 +1,4 @@
-#include "easy_meter_master.h"
+#include "easy_meter.h"
 #include "config.h"
 #include "config_yaml.h"
 #include "json_utils.h"
@@ -23,13 +23,12 @@
 
 using json = nlohmann::ordered_json;
 
-EasyMeterMaster::EasyMeterMaster(const MeterConfig &cfg,
-                                 SignalHandler &signalHandler)
+EasyMeter::EasyMeter(const MeterConfig &cfg, SignalHandler &signalHandler)
     : cfg_(cfg), ecfg_(std::get<EasyMeterConfig>(cfg.body)),
       handler_(signalHandler) {
 
   // Logger chain: meter.master -> meter -> default. Same convention as
-  // FroniusMeterMaster; the EBZ's master-side diagnostics are telegram
+  // FroniusMeter; the EBZ's master-side diagnostics are telegram
   // framing / OBIS parsing rather than Modbus, but the routing is identical.
   logger_ = spdlog::get("meter.master");
   if (!logger_)
@@ -38,17 +37,17 @@ EasyMeterMaster::EasyMeterMaster(const MeterConfig &cfg,
     logger_ = spdlog::default_logger();
 
   // Start the read loop thread.
-  worker_ = std::thread(&EasyMeterMaster::runLoop, this);
+  worker_ = std::thread(&EasyMeter::runLoop, this);
 }
 
-EasyMeterMaster::~EasyMeterMaster() {
+EasyMeter::~EasyMeter() {
   cv_.notify_all();
   if (worker_.joinable())
     worker_.join();
   disconnect();
 }
 
-void EasyMeterMaster::disconnect(void) {
+void EasyMeter::disconnect(void) {
   if (serialPort_ != -1) {
     close(serialPort_);
     serialPort_ = -1;
@@ -56,7 +55,7 @@ void EasyMeterMaster::disconnect(void) {
     if (availabilityCallback_)
       availabilityCallback_("disconnected");
 
-    logger_->info("EasyMeter '{}' disconnected", cfg_.name);
+    logger_->info("Meter '{}' disconnected", cfg_.name);
   }
   {
     std::unique_lock<std::mutex> lock(cbMutex_);
@@ -66,7 +65,7 @@ void EasyMeterMaster::disconnect(void) {
 }
 
 MeterTypes::ErrorAction
-EasyMeterMaster::handleResult(std::expected<void, ModbusError> &&result) {
+EasyMeter::handleResult(std::expected<void, ModbusError> &&result) {
   if (result) {
     return MeterTypes::ErrorAction::NONE;
   }
@@ -90,7 +89,7 @@ EasyMeterMaster::handleResult(std::expected<void, ModbusError> &&result) {
 
   } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
     // Shutdown already in progress - just exit cleanly
-    logger_->trace("EasyMeter operation cancelled due to shutdown: {}",
+    logger_->trace("Meter operation cancelled due to shutdown: {}",
                    err.describe());
     return MeterTypes::ErrorAction::SHUTDOWN;
   }
@@ -98,7 +97,7 @@ EasyMeterMaster::handleResult(std::expected<void, ModbusError> &&result) {
   return MeterTypes::ErrorAction::NONE;
 }
 
-std::expected<void, ModbusError> EasyMeterMaster::tryConnect(void) {
+std::expected<void, ModbusError> EasyMeter::tryConnect(void) {
   if (!handler_.isRunning()) {
     return std::unexpected(
         ModbusError::custom(EINTR, "tryConnect(): Shutdown in progress"));
@@ -211,7 +210,7 @@ std::expected<void, ModbusError> EasyMeterMaster::tryConnect(void) {
   // a fresh telegram boundary
   tcflush(serialPort_, TCIOFLUSH);
 
-  logger_->info("EasyMeter '{}' connected ({}{}{}, {} baud)", cfg_.name,
+  logger_->info("Meter '{}' connected ({}{}{}, {} baud)", cfg_.name,
                 ecfg_.rtu.dataBits, parityToChar(ecfg_.rtu.parity),
                 ecfg_.rtu.stopBits, ecfg_.rtu.baud);
 
@@ -221,7 +220,7 @@ std::expected<void, ModbusError> EasyMeterMaster::tryConnect(void) {
   return {};
 }
 
-std::expected<void, ModbusError> EasyMeterMaster::readTelegram() {
+std::expected<void, ModbusError> EasyMeter::readTelegram() {
   if (!handler_.isRunning()) {
     return std::unexpected(
         ModbusError::custom(EINTR, "readTelegram(): Shutdown in progress"));
@@ -290,7 +289,7 @@ std::expected<void, ModbusError> EasyMeterMaster::readTelegram() {
   return {};
 }
 
-std::expected<void, ModbusError> EasyMeterMaster::updateValuesAndJson() {
+std::expected<void, ModbusError> EasyMeter::updateValuesAndJson() {
   if (!handler_.isRunning()) {
     return std::unexpected(ModbusError::custom(
         EINTR, "updateValuesAndJson(): Shutdown in progress"));
@@ -524,7 +523,7 @@ std::expected<void, ModbusError> EasyMeterMaster::updateValuesAndJson() {
   return {};
 }
 
-std::expected<void, ModbusError> EasyMeterMaster::updateDeviceAndJson() {
+std::expected<void, ModbusError> EasyMeter::updateDeviceAndJson() {
   if (!handler_.isRunning()) {
     return std::unexpected(ModbusError::custom(
         EINTR, "updateDeviceAndJson(): Shutdown in progress"));
@@ -610,7 +609,7 @@ std::expected<void, ModbusError> EasyMeterMaster::updateDeviceAndJson() {
   return {};
 }
 
-void EasyMeterMaster::runLoop() {
+void EasyMeter::runLoop() {
 
   while (handler_.isRunning()) {
 
@@ -657,5 +656,5 @@ void EasyMeterMaster::runLoop() {
     }
   }
 
-  logger_->debug("EasyMeter '{}' run loop stopped.", cfg_.name);
+  logger_->debug("Meter '{}' run loop stopped.", cfg_.name);
 }

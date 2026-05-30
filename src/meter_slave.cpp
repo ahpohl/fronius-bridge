@@ -468,7 +468,8 @@ void MeterSlave::tcpClientWorker(int socket) {
 
   // Extract client connection information (IPv4 and IPv6 compatible)
   auto client = ModbusUtils::getSocketInfo(socket);
-  logger_->info("Client connected from {}:{}", client.ip, client.port);
+  logger_->info("Meter '{}' client connected from {}:{}", name_, client.ip,
+                client.port);
 
   uint8_t query[MODBUS_TCP_MAX_ADU_LENGTH];
 
@@ -506,7 +507,8 @@ void MeterSlave::tcpClientWorker(int socket) {
 
     // --- Empty frame (connection closed by client gracefully) ---
     if (rc == 0) {
-      logger_->info("Client {}:{} closed connection", client.ip, client.port);
+      logger_->info("Meter '{}' client {}:{} closed connection", name_,
+                    client.ip, client.port);
       break;
     }
 
@@ -516,8 +518,9 @@ void MeterSlave::tcpClientWorker(int socket) {
     if (errno == ETIMEDOUT || errno == EAGAIN || errno == EWOULDBLOCK) {
       auto now = std::chrono::steady_clock::now();
       if (now - lastActivity > idleTimeout) {
-        logger_->info("Client {}:{} idle timeout ({}s), disconnecting",
-                      client.ip, client.port, cfg_.idleTimeout);
+        logger_->info("Meter '{}' client {}:{} idle timeout ({}s), "
+                      "disconnecting",
+                      name_, client.ip, client.port, cfg_.idleTimeout);
         break;
       }
       continue;
@@ -529,8 +532,8 @@ void MeterSlave::tcpClientWorker(int socket) {
     }
 
     // Connection issue, protocol error or abrupt disconnection
-    logger_->info("Client {}:{} disconnected: {}", client.ip, client.port,
-                  modbus_strerror(errno));
+    logger_->info("Meter '{}' client {}:{} disconnected: {}", name_, client.ip,
+                  client.port, modbus_strerror(errno));
     break;
   }
 
@@ -573,9 +576,10 @@ void MeterSlave::rtuClientHandler() {
     // --- Valid request received ---
     if (rc > 0) {
       if (!isActive) {
-        logger_->info("Client connected (slave_id={}, "
+        logger_->info("Meter '{}' client connected (slave_id={}, "
                       "request_timeout={}s, idle_timeout={}s)",
-                      cfg_.slaveId, cfg_.requestTimeout, cfg_.idleTimeout);
+                      name_, cfg_.slaveId, cfg_.requestTimeout,
+                      cfg_.idleTimeout);
         isActive = true;
       }
       lastActivity = std::chrono::steady_clock::now();
@@ -605,7 +609,8 @@ void MeterSlave::rtuClientHandler() {
     if (errno == ETIMEDOUT || errno == EAGAIN || errno == EWOULDBLOCK) {
       auto now = std::chrono::steady_clock::now();
       if (now - lastActivity > idleTimeout && isActive) {
-        logger_->info("Client disconnected, idle for {}s", cfg_.idleTimeout);
+        logger_->info("Meter '{}' client disconnected, idle for {}s", name_,
+                      cfg_.idleTimeout);
         lastActivity = now;
         isActive = false;
       }

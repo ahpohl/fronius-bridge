@@ -240,42 +240,6 @@ InverterTypes::Values InverterMaster::getValues() const {
   return values_;
 }
 
-ModbusBusConfig InverterMaster::makeBusConfig(const InverterConfig &cfg) {
-  ModbusBusConfig busCfg;
-
-  if (cfg.tcp) {
-    busCfg.transport = ModbusTcpTransport{
-        .host = cfg.tcp->host,
-        .port = cfg.tcp->port,
-    };
-  } else if (cfg.rtu) {
-    busCfg.transport = ModbusRtuTransport{
-        .device = cfg.rtu->device,
-        .baud = cfg.rtu->baud,
-        .dataBits = cfg.rtu->dataBits,
-        .stopBits = cfg.rtu->stopBits,
-        .parity = parityToChar(cfg.rtu->parity),
-    };
-  } else {
-    throw std::runtime_error("InverterMaster: no transport configured");
-  }
-
-  // Enable the libmodbus wire trace only if the 'bus' logger is at trace
-  // level. The hex dump is the most verbose bus diagnostic, so it sits one
-  // level below the per-transaction 'bus' debug lines: `bus: debug` yields
-  // queue/tx/rx diagnostics, `bus: trace` additionally turns on the raw
-  // libmodbus wire dump. spdlog::get returns nullptr for an unconfigured
-  // logger, so the trace stays off unless the user opts in.
-  auto busLogger = spdlog::get("bus");
-  busCfg.debug = busLogger && (busLogger->level() == spdlog::level::trace);
-
-  busCfg.reconnectDelay = cfg.reconnectDelay.min;
-  busCfg.reconnectDelayMax = cfg.reconnectDelay.max;
-  busCfg.exponential = cfg.reconnectDelay.exponential;
-
-  return busCfg;
-}
-
 ModbusDeviceConfig InverterMaster::makeDeviceConfig(const InverterConfig &cfg) {
   ModbusDeviceConfig devCfg;
   devCfg.slaveId = cfg.slaveId;

@@ -52,8 +52,6 @@ public:
   setDeviceCallback(std::function<void(std::string, InverterTypes::Device)> cb);
   void setAvailabilityCallback(std::function<void(std::string)> cb);
 
-  static ModbusBusConfig makeBusConfig(const InverterConfig &cfg);
-
 private:
   static ModbusDeviceConfig makeDeviceConfig(const InverterConfig &cfg);
   void runLoop();

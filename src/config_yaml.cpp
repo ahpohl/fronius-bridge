@@ -1,28 +1,20 @@
 #include "config_yaml.h"
+#include <algorithm>
 #include <array>
 #include <format>
+#include <fronius/modbus_config.h>
 #include <map>
 #include <optional>
 #include <regex>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <yaml-cpp/yaml.h>
 
 // ---------------------------------------------------------------------------
 // Serial conversion helpers
 // ---------------------------------------------------------------------------
-
-char parityToChar(Parity parity) {
-  switch (parity) {
-  case Parity::Even:
-    return 'E';
-  case Parity::Odd:
-    return 'O';
-  default:
-    return 'N';
-  }
-}
 
 namespace {
 
@@ -97,6 +89,17 @@ tcflag_t dataBitsToFlag(int dataBits) {
   default:
     throw std::logic_error("dataBitsToFlag called with unvalidated data bits " +
                            std::to_string(dataBits));
+  }
+}
+
+char parityToChar(Parity parity) {
+  switch (parity) {
+  case Parity::Even:
+    return 'E';
+  case Parity::Odd:
+    return 'O';
+  default:
+    return 'N';
   }
 }
 
@@ -545,8 +548,6 @@ static LoggerConfig parseLogger(const YAML::Node &node) {
 namespace {
 
 // Stable string identity for a bus (RTU device path, or TCP host:port).
-// Kept in sync with the lambda in main.cpp; if/when that is factored out
-// of main.cpp, this duplication goes away.
 std::string busKeyTcp(const ModbusTcpClientConfig &tcp) {
   return tcp.host + ":" + std::to_string(tcp.port);
 }
@@ -574,7 +575,142 @@ std::string busKey(const DeviceRef &d) {
   return d.rtu ? busKeyRtu(*d.rtu) : busKeyTcp(*d.tcp);
 }
 
+// Translate a single device's config into the libfronius bus config it would
+// open (transport + reconnect policy + wire-trace flag). Pure config->config
+// transformation; opens no hardware. FroniusMeterConfig and InverterConfig
+// share the same .tcp/.rtu/.reconnectDelay shape, so one template serves both.
+template <typename Cfg> ModbusBusConfig makeBusConfig(const Cfg &cfg) {
+  ModbusBusConfig busCfg;
+
+  if (cfg.tcp) {
+    busCfg.transport = ModbusTcpTransport{
+        .host = cfg.tcp->host,
+        .port = cfg.tcp->port,
+    };
+  } else if (cfg.rtu) {
+    busCfg.transport = ModbusRtuTransport{
+        .device = cfg.rtu->device,
+        .baud = cfg.rtu->baud,
+        .dataBits = cfg.rtu->dataBits,
+        .stopBits = cfg.rtu->stopBits,
+        .parity = parityToChar(cfg.rtu->parity),
+    };
+  } else {
+    // Defensive: parsing already requires exactly one transport per device.
+    throw std::runtime_error("device has no transport configured (need tcp or "
+                             "rtu)");
+  }
+
+  // Enable the libmodbus wire trace only if the 'bus' logger is at trace
+  // level. The hex dump is the most verbose bus diagnostic, so it sits one
+  // level below the per-transaction 'bus' debug lines: `bus: debug` yields
+  // queue/tx/rx diagnostics, `bus: trace` additionally turns on the raw
+  // libmodbus wire dump. spdlog::get returns nullptr for an unconfigured
+  // logger, so the trace stays off unless the user opts in.
+  auto busLogger = spdlog::get("bus");
+  busCfg.debug = busLogger && (busLogger->level() == spdlog::level::trace);
+
+  busCfg.reconnectDelay = cfg.reconnectDelay.min;
+  busCfg.reconnectDelayMax = cfg.reconnectDelay.max;
+  busCfg.exponential = cfg.reconnectDelay.exponential;
+
+  return busCfg;
+}
+
+// Fold a device's reconnect-delay parameters into the bus-level aggregate.
+// On a shared bus we cannot honour each device's reconnect policy
+// individually — the bus has a single reconnect schedule — so we pick the
+// most-responsive interpretation:
+//   - min: smallest min across all devices (fastest first retry)
+//   - max: smallest max across all devices (cap backoff at the
+//          most-impatient device's tolerance)
+//   - exponential: true if any device wants exponential backoff
+//
+// If every device configures the same values, this aggregation is a no-op.
+void mergeReconnectDelay(ModbusBusConfig &dst, const ModbusBusConfig &src) {
+  dst.reconnectDelay = std::min(dst.reconnectDelay, src.reconnectDelay);
+  dst.reconnectDelayMax =
+      std::min(dst.reconnectDelayMax, src.reconnectDelayMax);
+  dst.exponential = dst.exponential || src.exponential;
+}
+
+// What a meter contributes to the shared-bus registry: the bus it joins, the
+// config it opens, and the slave id it answers on. Dispatch is on the
+// meter-kind variant so the registry build stays kind-agnostic: Fronius
+// (Modbus) meters return a populated entry; the EBZ Easymeter owns a dedicated
+// serial line and never joins the shared bus, so it returns nullopt. The visit
+// is exhaustive, forcing an explicit decision for any future meter kind.
+struct MeterBusEntry {
+  std::string key;
+  ModbusBusConfig config;
+  int slaveId;
+};
+
+std::optional<MeterBusEntry> meterBusEntry(const MeterConfig &m) {
+  return std::visit(
+      [](const auto &body) -> std::optional<MeterBusEntry> {
+        using T = std::decay_t<decltype(body)>;
+        if constexpr (std::is_same_v<T, FroniusMeterConfig>) {
+          std::string key =
+              body.rtu ? busKeyRtu(*body.rtu) : busKeyTcp(*body.tcp);
+          return MeterBusEntry{std::move(key), makeBusConfig(body),
+                               body.slaveId};
+        } else if constexpr (std::is_same_v<T, EasyMeterConfig>) {
+          return std::nullopt;
+        } else {
+          static_assert(sizeof(T) == 0, "unhandled meter kind");
+        }
+      },
+      m.body);
+}
+
 } // namespace
+
+std::optional<std::string> busKeyOf(const MeterConfig &m) {
+  auto entry = meterBusEntry(m);
+  return entry ? std::optional<std::string>(std::move(entry->key))
+               : std::nullopt;
+}
+
+std::string busKeyOf(const InverterConfig &i) {
+  return i.rtu ? busKeyRtu(*i.rtu) : busKeyTcp(*i.tcp);
+}
+
+std::string busTransportLabel(const ModbusBusConfig &cfg) {
+  if (cfg.isRtu()) {
+    const auto &r = cfg.rtu();
+    return "RTU " + std::to_string(r.baud) + " " + std::to_string(r.dataBits) +
+           r.parity + std::to_string(r.stopBits);
+  }
+  return "TCP";
+}
+
+// Synthesise the deduplicated bus registry from the inverter and meter
+// sections. Each unique transport (RTU device path or TCP host:port) becomes
+// one BusInfo; devices that share it are aggregated — reconnect-delay merged
+// to a single policy (see mergeReconnectDelay) and recorded as members. The
+// EBZ Easymeter contributes nothing (meterBusEntry returns nullopt). No
+// hardware is opened here. Call after validateConfig(), which guarantees that
+// devices sharing a bus already agree on line parameters.
+static std::map<std::string, BusInfo> deriveBuses(const AppConfig &cfg) {
+  std::map<std::string, BusInfo> buses;
+
+  auto fold = [&](const std::string &key, const ModbusBusConfig &busCfg,
+                  std::string name, int slaveId) {
+    auto [it, inserted] = buses.try_emplace(key, BusInfo{busCfg, {}});
+    if (!inserted)
+      mergeReconnectDelay(it->second.config, busCfg);
+    it->second.members.push_back({std::move(name), slaveId});
+  };
+
+  for (const auto &m : cfg.meters)
+    if (auto e = meterBusEntry(m))
+      fold(e->key, e->config, m.name, e->slaveId);
+  for (const auto &i : cfg.inverters)
+    fold(busKeyOf(i), makeBusConfig(i), i.name, i.slaveId);
+
+  return buses;
+}
 
 static void validateConfig(const AppConfig &cfg) {
   // --- Collect master-role devices in a uniform form ---
@@ -618,10 +754,10 @@ static void validateConfig(const AppConfig &cfg) {
     if (!e)
       continue;
     if (ebzMeter)
-      throw std::runtime_error(std::format(
-          "at most one meter of type ebz is allowed, but found "
-          "meters[{}] ('{}') and meters[{}] ('{}')",
-          ebzMeter->index, ebzMeter->name, i, cfg.meters[i].name));
+      throw std::runtime_error(
+          std::format("at most one meter of type ebz is allowed, but found "
+                      "meters[{}] ('{}') and meters[{}] ('{}')",
+                      ebzMeter->index, ebzMeter->name, i, cfg.meters[i].name));
     ebzMeter = EbzRef{i, cfg.meters[i].name, &e->rtu};
   }
 
@@ -647,8 +783,8 @@ static void validateConfig(const AppConfig &cfg) {
           byName.try_emplace(std::string(ebzMeter->name), owner);
       if (!inserted) {
         throw std::runtime_error(
-            std::format("duplicate device name '{}': {} and {}",
-                        ebzMeter->name, it->second, owner));
+            std::format("duplicate device name '{}': {} and {}", ebzMeter->name,
+                        it->second, owner));
       }
     }
   }
@@ -805,6 +941,9 @@ AppConfig loadConfig(const std::string &path) {
   cfg.logger = parseLogger(root["logger"]);
 
   validateConfig(cfg);
+
+  // Derive the deduplicated bus registry from the validated device sections.
+  cfg.buses = deriveBuses(cfg);
 
   return cfg;
 }

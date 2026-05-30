@@ -1,5 +1,5 @@
-#ifndef EASY_METER_MASTER_H_
-#define EASY_METER_MASTER_H_
+#ifndef EASY_METER_H_
+#define EASY_METER_H_
 
 #include "config_yaml.h"
 #include "meter_master.h"
@@ -17,9 +17,9 @@
 #include <thread>
 
 // ---------------------------------------------------------------------------
-// EasyMeterMaster — wire-side reader for an EBZ Easymeter.
+// EasyMeter — wire-side reader for an EBZ Easymeter.
 //
-// Unlike FroniusMeterMaster this is NOT a Modbus device:
+// Unlike FroniusMeter this is NOT a Modbus device:
 //   - It owns a serial line exclusively (flock + TIOCEXCL); the line cannot
 //     be shared, so the EBZ never joins the shared FroniusBus registry.
 //   - It is event-driven: the worker blocks reading inbound SML/OBIS
@@ -35,17 +35,16 @@
 // from MeterMaster; this class fires the inherited callbacks from its worker.
 // ---------------------------------------------------------------------------
 
-class EasyMeterMaster : public MeterMaster {
+class EasyMeter : public MeterMaster {
 public:
-  explicit EasyMeterMaster(const MeterConfig &cfg,
-                           SignalHandler &signalHandler);
-  ~EasyMeterMaster() override;
+  explicit EasyMeter(const MeterConfig &cfg, SignalHandler &signalHandler);
+  ~EasyMeter() override;
 
   // Non-copyable, non-movable — owns a thread and a file descriptor.
-  EasyMeterMaster(const EasyMeterMaster &) = delete;
-  EasyMeterMaster &operator=(const EasyMeterMaster &) = delete;
-  EasyMeterMaster(EasyMeterMaster &&) = delete;
-  EasyMeterMaster &operator=(EasyMeterMaster &&) = delete;
+  EasyMeter(const EasyMeter &) = delete;
+  EasyMeter &operator=(const EasyMeter &) = delete;
+  EasyMeter(EasyMeter &&) = delete;
+  EasyMeter &operator=(EasyMeter &&) = delete;
 
   static constexpr size_t BUFFER_SIZE = 64;
   static constexpr size_t TELEGRAM_SIZE = 368;
@@ -84,4 +83,4 @@ private:
   std::thread worker_;
 };
 
-#endif /* EASY_METER_MASTER_H_ */
+#endif /* EASY_METER_H_ */

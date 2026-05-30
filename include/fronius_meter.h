@@ -1,5 +1,5 @@
-#ifndef FRONIUS_METER_MASTER_H_
-#define FRONIUS_METER_MASTER_H_
+#ifndef FRONIUS_METER_H_
+#define FRONIUS_METER_H_
 
 #include "config_yaml.h"
 #include "meter_master.h"
@@ -18,19 +18,18 @@
 #include <spdlog/logger.h>
 #include <thread>
 
-class FroniusMeterMaster : public MeterMaster {
+class FroniusMeter : public MeterMaster {
 public:
-  explicit FroniusMeterMaster(const MeterConfig &cfg,
-                              SignalHandler &signalHandler,
-                              std::shared_ptr<FroniusBus> bus);
-  ~FroniusMeterMaster() override;
+  explicit FroniusMeter(const MeterConfig &cfg, SignalHandler &signalHandler,
+                        std::shared_ptr<FroniusBus> bus);
+  ~FroniusMeter() override;
 
   // Non-copyable, non-movable — owns a thread. (Also deleted in the base,
   // restated here for clarity at the concrete type.)
-  FroniusMeterMaster(const FroniusMeterMaster &) = delete;
-  FroniusMeterMaster &operator=(const FroniusMeterMaster &) = delete;
-  FroniusMeterMaster(FroniusMeterMaster &&) = delete;
-  FroniusMeterMaster &operator=(FroniusMeterMaster &&) = delete;
+  FroniusMeter(const FroniusMeter &) = delete;
+  FroniusMeter &operator=(const FroniusMeter &) = delete;
+  FroniusMeter(FroniusMeter &&) = delete;
+  FroniusMeter &operator=(FroniusMeter &&) = delete;
 
   std::string getJsonDump(void) const;
   MeterTypes::Values getValues(void) const;
@@ -41,8 +40,6 @@ public:
   // changed. Used by runLoop to skip publishing the (unchanged) device
   // JSON to MQTT on every poll cycle.
   std::expected<bool, ModbusError> updateDeviceAndJson(void);
-
-  static ModbusBusConfig makeBusConfig(const FroniusMeterConfig &cfg);
 
 private:
   static ModbusDeviceConfig makeDeviceConfig(const FroniusMeterConfig &cfg);
@@ -81,4 +78,4 @@ private:
   std::atomic<bool> deviceUpdated_{false};
 };
 
-#endif /* FRONIUS_METER_MASTER_H_ */
+#endif /* FRONIUS_METER_H_ */
