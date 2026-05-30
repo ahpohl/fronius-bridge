@@ -1,84 +1,79 @@
 #ifndef METER_MASTER_H_
 #define METER_MASTER_H_
 
-#include "config_yaml.h"
 #include "meter_types.h"
-#include "signal_handler.h"
-#include <atomic>
-#include <condition_variable>
-#include <expected>
-#include <fronius/fronius_bus.h>
-#include <fronius/meter.h>
-#include <fronius/modbus_config.h>
 #include <functional>
-#include <memory>
 #include <mutex>
-#include <nlohmann/json.hpp>
-#include <spdlog/logger.h>
-#include <thread>
+#include <string>
+#include <utility>
+
+// ---------------------------------------------------------------------------
+// MeterMaster — abstract base for the wire-side reader of a single meter.
+//
+// A "meter master" owns whatever transport reads a physical meter (Modbus for
+// Fronius SunSpec meters, a serial SML/OBIS stream for the EBZ Easymeter) and
+// surfaces three streams to the application via callbacks:
+//
+//   - value callback:        live measurements (MeterTypes::Values)
+//   - device callback:       device identity / nameplate (MeterTypes::Device)
+//   - availability callback: a connectivity state string
+//
+// Concrete subclasses (FroniusMeterMaster, EasyMeterMaster) implement the
+// transport and their own worker thread; they invoke the stored callbacks
+// when fresh data arrives. main.cpp holds masters through this base so the
+// callback-wiring is identical regardless of meter kind.
+//
+// Callback storage and the mutex that guards it live here in the base so the
+// locking discipline is shared and not re-implemented per subclass. The three
+// setters are non-virtual: subclasses must not change how callbacks are
+// stored, only when they are fired. Subclasses read the callbacks under
+// cbMutex_ from their worker thread.
+//
+// Lifetime: a master owns a thread that may invoke these callbacks, so a
+// master must outlive any object its callbacks touch. Subclass destructors
+// are responsible for joining their worker (and removing any bus callbacks)
+// before base teardown; the virtual destructor guarantees correct
+// destruction through a base pointer.
+// ---------------------------------------------------------------------------
 
 class MeterMaster {
 public:
-  explicit MeterMaster(const MeterConfig &cfg, SignalHandler &signalHandler,
-                       std::shared_ptr<FroniusBus> bus);
-  virtual ~MeterMaster();
+  virtual ~MeterMaster() = default;
 
-  // Non-copyable, non-movable — owns a thread.
+  // Non-copyable, non-movable — subclasses own a thread.
   MeterMaster(const MeterMaster &) = delete;
   MeterMaster &operator=(const MeterMaster &) = delete;
   MeterMaster(MeterMaster &&) = delete;
   MeterMaster &operator=(MeterMaster &&) = delete;
 
-  std::string getJsonDump(void) const;
-  MeterTypes::Values getValues(void) const;
-
-  std::expected<void, ModbusError> updateValuesAndJson(void);
-  // Returns true if the device info was (re)read from the wire on this
-  // call, false if it was already cached from a previous call and nothing
-  // changed. Used by runLoop to skip publishing the (unchanged) device
-  // JSON to MQTT on every poll cycle.
-  std::expected<bool, ModbusError> updateDeviceAndJson(void);
-
+  // Install the callbacks invoked by the subclass worker thread. Thread-safe;
+  // each replaces any previously-installed callback under cbMutex_.
   void
-  setValueCallback(std::function<void(std::string, MeterTypes::Values)> cb);
+  setValueCallback(std::function<void(std::string, MeterTypes::Values)> cb) {
+    std::lock_guard<std::mutex> lock(cbMutex_);
+    valueCallback_ = std::move(cb);
+  }
   void
-  setDeviceCallback(std::function<void(std::string, MeterTypes::Device)> cb);
-  void setAvailabilityCallback(std::function<void(std::string)> cb);
+  setDeviceCallback(std::function<void(std::string, MeterTypes::Device)> cb) {
+    std::lock_guard<std::mutex> lock(cbMutex_);
+    deviceCallback_ = std::move(cb);
+  }
+  void setAvailabilityCallback(std::function<void(std::string)> cb) {
+    std::lock_guard<std::mutex> lock(cbMutex_);
+    availabilityCallback_ = std::move(cb);
+  }
 
-  static ModbusBusConfig makeBusConfig(const MeterConfig &cfg);
+protected:
+  MeterMaster() = default;
 
-private:
-  static ModbusDeviceConfig makeDeviceConfig(const MeterConfig &cfg);
-  void runLoop();
+  // Guards the three callbacks below (and is reused by subclasses to guard
+  // their own data that is published alongside a callback invocation).
+  // mutable so const accessors in subclasses may lock it.
+  mutable std::mutex cbMutex_;
 
-  std::shared_ptr<FroniusBus> bus_;
-  std::shared_ptr<Meter> meter_;
-  // Held by value: AppConfig's std::vector<MeterConfig> may reallocate.
-  const MeterConfig cfg_;
-  std::shared_ptr<spdlog::logger> logger_;
-
-  // Bus-level callback IDs registered by this master. The destructor
-  // removes them before tearing down state captured by their lambdas
-  // (this, logger_, handler_), since the bus thread may outlive any
-  // individual master on a shared bus.
-  std::vector<FroniusBus::CallbackId> busCallbackIds_;
-
-  // --- values and device info ---
-  MeterTypes::Device device_;
-  MeterTypes::Values values_;
-  nlohmann::ordered_json jsonValues_;
-  nlohmann::json jsonDevice_;
-
-  // --- threading / callbacks ---
   std::function<void(std::string, MeterTypes::Values)> valueCallback_;
   std::function<void(std::string, MeterTypes::Device)> deviceCallback_;
   std::function<void(std::string)> availabilityCallback_;
-  SignalHandler &handler_;
-  mutable std::mutex cbMutex_;
-  std::thread worker_;
-  std::atomic<bool> connected_{false};
-  std::condition_variable cv_;
-  std::atomic<bool> deviceUpdated_{false};
 };
 
 #endif /* METER_MASTER_H_ */

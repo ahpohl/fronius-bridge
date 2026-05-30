@@ -21,9 +21,10 @@ InverterMaster::InverterMaster(const InverterConfig &cfg,
                                std::shared_ptr<FroniusBus> bus)
     : bus_(std::move(bus)), cfg_(cfg), handler_(signalHandler) {
 
-  logger_ = spdlog::get(cfg_.name + ".master");
-  if (!logger_)
-    logger_ = spdlog::get(cfg_.name);
+  // Fixed class-based logger chain: inverter -> default. The device name
+  // is no longer part of the logger name (it already appears in every
+  // connect/disconnect message), so all inverters share one module.
+  logger_ = spdlog::get("inverter");
   if (!logger_)
     logger_ = spdlog::default_logger();
 
@@ -259,9 +260,14 @@ ModbusBusConfig InverterMaster::makeBusConfig(const InverterConfig &cfg) {
     throw std::runtime_error("InverterMaster: no transport configured");
   }
 
-  // Enable debug only if logger is at trace level
-  auto mainLogger = spdlog::get("main");
-  busCfg.debug = mainLogger && (mainLogger->level() == spdlog::level::trace);
+  // Enable the libmodbus wire trace only if the 'bus' logger is at trace
+  // level. The hex dump is the most verbose bus diagnostic, so it sits one
+  // level below the per-transaction 'bus' debug lines: `bus: debug` yields
+  // queue/tx/rx diagnostics, `bus: trace` additionally turns on the raw
+  // libmodbus wire dump. spdlog::get returns nullptr for an unconfigured
+  // logger, so the trace stays off unless the user opts in.
+  auto busLogger = spdlog::get("bus");
+  busCfg.debug = busLogger && (busLogger->level() == spdlog::level::trace);
 
   busCfg.reconnectDelay = cfg.reconnectDelay.min;
   busCfg.reconnectDelayMax = cfg.reconnectDelay.max;

@@ -20,9 +20,13 @@ MeterSlave::MeterSlave(const MeterSlaveConfig &cfg, std::string meterName,
                        SignalHandler &signalHandler)
     : name_(std::move(meterName)), cfg_(cfg), handler_(signalHandler) {
 
-  logger_ = spdlog::get(name_ + ".slave");
+  // Fixed class-based logger chain: meter.slave -> meter -> default.
+  // The meter name is no longer part of the logger name (it already
+  // appears in connect/disconnect messages), so all meter slaves share
+  // one configurable module.
+  logger_ = spdlog::get("meter.slave");
   if (!logger_)
-    logger_ = spdlog::get(name_);
+    logger_ = spdlog::get("meter");
   if (!logger_)
     logger_ = spdlog::default_logger();
 

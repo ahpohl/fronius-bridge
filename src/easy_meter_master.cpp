@@ -1,0 +1,661 @@
+#include "easy_meter_master.h"
+#include "config.h"
+#include "config_yaml.h"
+#include "json_utils.h"
+#include "meter_types.h"
+#include "signal_handler.h"
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <expected>
+#include <fcntl.h>
+#include <mutex>
+#include <nlohmann/json.hpp>
+#include <regex>
+#include <sstream>
+#include <string>
+#include <sys/file.h>
+#include <sys/ioctl.h>
+#include <termios.h>
+#include <unistd.h>
+#include <vector>
+
+using json = nlohmann::ordered_json;
+
+EasyMeterMaster::EasyMeterMaster(const MeterConfig &cfg,
+                                 SignalHandler &signalHandler)
+    : cfg_(cfg), ecfg_(std::get<EasyMeterConfig>(cfg.body)),
+      handler_(signalHandler) {
+
+  // Logger chain: meter.master -> meter -> default. Same convention as
+  // FroniusMeterMaster; the EBZ's master-side diagnostics are telegram
+  // framing / OBIS parsing rather than Modbus, but the routing is identical.
+  logger_ = spdlog::get("meter.master");
+  if (!logger_)
+    logger_ = spdlog::get("meter");
+  if (!logger_)
+    logger_ = spdlog::default_logger();
+
+  // Start the read loop thread.
+  worker_ = std::thread(&EasyMeterMaster::runLoop, this);
+}
+
+EasyMeterMaster::~EasyMeterMaster() {
+  cv_.notify_all();
+  if (worker_.joinable())
+    worker_.join();
+  disconnect();
+}
+
+void EasyMeterMaster::disconnect(void) {
+  if (serialPort_ != -1) {
+    close(serialPort_);
+    serialPort_ = -1;
+
+    if (availabilityCallback_)
+      availabilityCallback_("disconnected");
+
+    logger_->info("EasyMeter '{}' disconnected", cfg_.name);
+  }
+  {
+    std::unique_lock<std::mutex> lock(cbMutex_);
+    cv_.wait_for(lock, std::chrono::seconds(1),
+                 [this] { return !handler_.isRunning(); });
+  }
+}
+
+MeterTypes::ErrorAction
+EasyMeterMaster::handleResult(std::expected<void, ModbusError> &&result) {
+  if (result) {
+    return MeterTypes::ErrorAction::NONE;
+  }
+
+  const ModbusError &err = result.error();
+
+  if (err.severity == ModbusError::Severity::FATAL) {
+    // Fatal error occurred - initiate shutdown sequence
+    logger_->error("FATAL EasyMeter error: {}", err.describe());
+    handler_.shutdown();
+    return MeterTypes::ErrorAction::SHUTDOWN;
+
+  } else if (err.severity == ModbusError::Severity::TRANSIENT) {
+    // Temporary error - disconnect, wait and reconnect. Telegram framing
+    // errors (EPROTO) land here too: disconnect() closes the port, tryConnect
+    // reopens it and flushes the serial buffers, so the next readTelegram
+    // re-syncs the stream from scratch.
+    logger_->warn("Transient EasyMeter error: {}", err.describe());
+    disconnect();
+    return MeterTypes::ErrorAction::RECONNECT;
+
+  } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
+    // Shutdown already in progress - just exit cleanly
+    logger_->trace("EasyMeter operation cancelled due to shutdown: {}",
+                   err.describe());
+    return MeterTypes::ErrorAction::SHUTDOWN;
+  }
+
+  return MeterTypes::ErrorAction::NONE;
+}
+
+std::expected<void, ModbusError> EasyMeterMaster::tryConnect(void) {
+  if (!handler_.isRunning()) {
+    return std::unexpected(
+        ModbusError::custom(EINTR, "tryConnect(): Shutdown in progress"));
+  }
+
+  if (serialPort_ >= 0)
+    return {};
+
+  serialPort_ = open(ecfg_.rtu.device.c_str(), O_RDONLY | O_NOCTTY);
+  if (serialPort_ == -1) {
+    return std::unexpected(
+        ModbusError::fromErrno("Opening serial device failed"));
+  }
+
+  if (!isatty(serialPort_)) {
+    int saved_errno = errno;
+    close(serialPort_);
+    serialPort_ = -1;
+    errno = saved_errno;
+    return std::unexpected(ModbusError::fromErrno("Device is not a tty"));
+  }
+
+  if (flock(serialPort_, LOCK_EX | LOCK_NB) == -1) {
+    int saved_errno = errno;
+    close(serialPort_);
+    serialPort_ = -1;
+    errno = saved_errno;
+    return std::unexpected(
+        ModbusError::fromErrno("Failed to lock serial device"));
+  }
+
+  if (ioctl(serialPort_, TIOCEXCL) == -1) {
+    int saved_errno = errno;
+    close(serialPort_);
+    serialPort_ = -1;
+    errno = saved_errno;
+    return std::unexpected(
+        ModbusError::fromErrno("Failed to set exclusive lock"));
+  }
+
+  termios serialPortSettings;
+  if (tcgetattr(serialPort_, &serialPortSettings) == -1) {
+    int saved_errno = errno;
+    close(serialPort_);
+    serialPort_ = -1;
+    errno = saved_errno;
+    return std::unexpected(
+        ModbusError::fromErrno("Failed to get serial port attributes"));
+  }
+
+  cfmakeraw(&serialPortSettings);
+
+  // set baud (both directions)
+  speed_t baudSpeed = baudToSpeed(ecfg_.rtu.baud);
+  if (cfsetispeed(&serialPortSettings, baudSpeed) < 0 ||
+      cfsetospeed(&serialPortSettings, baudSpeed) < 0) {
+    int saved_errno = errno;
+    close(serialPort_);
+    serialPort_ = -1;
+    errno = saved_errno;
+    return std::unexpected(ModbusError::fromErrno(
+        "Failed to set serial port speed {} baud", ecfg_.rtu.baud));
+  }
+
+  // Base flags: enable receiver, ignore modem control lines
+  serialPortSettings.c_cflag |= (CLOCAL | CREAD);
+
+  // Clear size/parity/stop/flow flags first to avoid unexpected bits
+  serialPortSettings.c_cflag &= ~(CSIZE | PARENB | PARODD | CSTOPB | CRTSCTS);
+
+  // Set data bits
+  serialPortSettings.c_cflag |= dataBitsToFlag(ecfg_.rtu.dataBits);
+
+  // Set parity
+  switch (ecfg_.rtu.parity) {
+  case Parity::Even:
+    serialPortSettings.c_cflag |= PARENB;
+    serialPortSettings.c_cflag &= ~PARODD;
+    break;
+  case Parity::Odd:
+    serialPortSettings.c_cflag |= PARENB;
+    serialPortSettings.c_cflag |= PARODD;
+    break;
+  case Parity::None:
+  default:
+    // PARENB already cleared above
+    break;
+  }
+
+  // Set stop bits (2 stop bits if stopBits == 2, otherwise 1)
+  if (ecfg_.rtu.stopBits == 2) {
+    serialPortSettings.c_cflag |= CSTOPB;
+  }
+
+  // blocking read: wait until buffer has been filled, 0.5s
+  // timeout for first byte (VTIME=5)
+  serialPortSettings.c_cc[VMIN] = BUFFER_SIZE;
+  serialPortSettings.c_cc[VTIME] = 5;
+
+  if (tcsetattr(serialPort_, TCSANOW, &serialPortSettings)) {
+    int saved_errno = errno;
+    close(serialPort_);
+    serialPort_ = -1;
+    errno = saved_errno;
+    return std::unexpected(
+        ModbusError::fromErrno("Failed to set serial port attributes"));
+  }
+
+  // flush both directions after applying settings so the next read starts on
+  // a fresh telegram boundary
+  tcflush(serialPort_, TCIOFLUSH);
+
+  logger_->info("EasyMeter '{}' connected ({}{}{}, {} baud)", cfg_.name,
+                ecfg_.rtu.dataBits, parityToChar(ecfg_.rtu.parity),
+                ecfg_.rtu.stopBits, ecfg_.rtu.baud);
+
+  if (availabilityCallback_)
+    availabilityCallback_("connected");
+
+  return {};
+}
+
+std::expected<void, ModbusError> EasyMeterMaster::readTelegram() {
+  if (!handler_.isRunning()) {
+    return std::unexpected(
+        ModbusError::custom(EINTR, "readTelegram(): Shutdown in progress"));
+  }
+
+  if (serialPort_ == -1)
+    return std::unexpected(
+        ModbusError::custom(ENOTCONN, "readTelegram(): Meter not connected"));
+
+  std::vector<char> buffer(BUFFER_SIZE);
+  std::vector<char> packet(TELEGRAM_SIZE);
+  size_t packetPos = 0;
+  bool messageBegin = false;
+  bool telegramComplete = false;
+
+  while (packetPos < TELEGRAM_SIZE && !telegramComplete) {
+    // Shutdown check BEFORE blocking read
+    if (!handler_.isRunning()) {
+      return std::unexpected(
+          ModbusError::custom(EINTR, "readTelegram(): Shutdown in progress"));
+    }
+
+    std::fill(buffer.begin(), buffer.end(), '\0');
+    ssize_t bytesReceived = ::read(serialPort_, buffer.data(), BUFFER_SIZE);
+
+    if (bytesReceived == -1) {
+      return std::unexpected(
+          ModbusError::fromErrno("Failed to read serial device"));
+    }
+
+    if (bytesReceived == 0) {
+      // Timeout - shouldn't happen mid-telegram
+      return std::unexpected(ModbusError::custom(
+          ETIMEDOUT, "readTelegram(): Timeout during read"));
+    }
+
+    // Process bytes
+    for (ssize_t i = 0; i < bytesReceived && packetPos < TELEGRAM_SIZE; ++i) {
+      char c = buffer[i];
+      if (c == '/')
+        messageBegin = true;
+      if (messageBegin) {
+        packet[packetPos++] = c;
+        if (packetPos >= 3 && packet[packetPos - 3] == '!') {
+          telegramComplete = true;
+          break;
+        }
+      }
+    }
+  }
+
+  // Ensure we have at least 3 bytes and the third-from-last is '!'
+  if (packetPos < 3 || packet[packetPos - 3] != '!') {
+    return std::unexpected(ModbusError::custom(
+        EPROTO, "readTelegram(): telegram stream not in sync"));
+  }
+
+  logger_->trace("Received telegram (len {}):\n{}", packetPos,
+                 std::string(packet.begin(), packet.begin() + packetPos));
+
+  {
+    std::lock_guard<std::mutex> lock(cbMutex_);
+    telegram_.assign(packet.begin(), packet.begin() + packetPos);
+  }
+
+  return {};
+}
+
+std::expected<void, ModbusError> EasyMeterMaster::updateValuesAndJson() {
+  if (!handler_.isRunning()) {
+    return std::unexpected(ModbusError::custom(
+        EINTR, "updateValuesAndJson(): Shutdown in progress"));
+  }
+  {
+    std::lock_guard<std::mutex> lock(cbMutex_);
+    if (telegram_.empty())
+      return {};
+  }
+
+  MeterTypes::Values values{};
+
+  std::istringstream iss;
+  {
+    std::lock_guard<std::mutex> lock(cbMutex_);
+    iss.str(telegram_);
+  }
+
+  values.time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+  double activeEnergy = 0.0;
+
+  std::regex obexRegex(R"(^([0-9]-0:[0-9]+.[0-9]+.[0-9]+\*255)\(([^)]+)\))");
+  std::string line;
+
+  while (std::getline(iss, line)) {
+    line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
+
+    if (line.empty() || (line.size() && (line[0] == '/' || line[0] == '!')))
+      continue;
+
+    try {
+      std::smatch match;
+      if (!std::regex_search(line, match, obexRegex))
+        throw std::invalid_argument("Malformed OBEX expression");
+
+      std::string obis = match[1];
+      std::string value_unit = match[2];
+
+      if (obis == "1-0:1.8.0*255") {
+        size_t pos = value_unit.find("*");
+        activeEnergy = std::stod(value_unit.substr(0, pos));
+      } else if (obis == "1-0:16.7.0*255") {
+        size_t pos = value_unit.find("*");
+        values.activePower = std::stod(value_unit.substr(0, pos));
+      } else if (obis == "1-0:36.7.0*255") {
+        size_t pos = value_unit.find("*");
+        values.phase1.activePower = std::stod(value_unit.substr(0, pos));
+      } else if (obis == "1-0:56.7.0*255") {
+        size_t pos = value_unit.find("*");
+        values.phase2.activePower = std::stod(value_unit.substr(0, pos));
+      } else if (obis == "1-0:76.7.0*255") {
+        size_t pos = value_unit.find("*");
+        values.phase3.activePower = std::stod(value_unit.substr(0, pos));
+      } else if (obis == "1-0:32.7.0*255") {
+        size_t pos = value_unit.find("*");
+        values.phase1.phVoltage = std::stod(value_unit.substr(0, pos));
+      } else if (obis == "1-0:52.7.0*255") {
+        size_t pos = value_unit.find("*");
+        values.phase2.phVoltage = std::stod(value_unit.substr(0, pos));
+      } else if (obis == "1-0:72.7.0*255") {
+        size_t pos = value_unit.find("*");
+        values.phase3.phVoltage = std::stod(value_unit.substr(0, pos));
+      }
+    } catch (const std::exception &err) {
+      std::ostringstream oss;
+      oss << "[" << line << "]: " << err.what();
+      return std::unexpected(ModbusError::custom(EPROTO, oss.str()));
+    }
+  }
+
+  const bool isLeading = ecfg_.grid.isLeading;
+  values.powerFactor = ecfg_.grid.powerFactor;
+  values.frequency = ecfg_.grid.frequency;
+
+  values.phase1.powerFactor = values.powerFactor;
+  values.phase2.powerFactor = values.powerFactor;
+  values.phase3.powerFactor = values.powerFactor;
+
+  const auto apparentPower = [](double active, double pf) {
+    return std::abs(active / pf);
+  };
+
+  const double sign = isLeading ? -1.0 : 1.0;
+  const auto reactivePower = [sign](double active, double pf) {
+    return sign * std::tan(std::acos(std::abs(pf))) * active;
+  };
+
+  // active power — direction from power factor sign
+  const double powerSign = values.powerFactor > 0.0 ? 1.0 : -1.0;
+  values.activePower *= powerSign;
+  values.phase1.activePower *= powerSign;
+  values.phase2.activePower *= powerSign;
+  values.phase3.activePower *= powerSign;
+
+  // apparent power
+  values.apparentPower = apparentPower(values.activePower, values.powerFactor);
+  values.phase1.apparentPower =
+      apparentPower(values.phase1.activePower, values.powerFactor);
+  values.phase2.apparentPower =
+      apparentPower(values.phase2.activePower, values.powerFactor);
+  values.phase3.apparentPower =
+      apparentPower(values.phase3.activePower, values.powerFactor);
+
+  // reactive power
+  values.reactivePower = reactivePower(values.activePower, values.powerFactor);
+  values.phase1.reactivePower =
+      reactivePower(values.phase1.activePower, values.powerFactor);
+  values.phase2.reactivePower =
+      reactivePower(values.phase2.activePower, values.powerFactor);
+  values.phase3.reactivePower =
+      reactivePower(values.phase3.activePower, values.powerFactor);
+
+  // active energy — direction from power factor sign
+  values.activeEnergyImport = values.powerFactor > 0.0 ? activeEnergy : 0.0;
+  values.activeEnergyExport = values.powerFactor < 0.0 ? activeEnergy : 0.0;
+
+  // apparent energy — magnitude only, direction from isLeading
+  const double apparentEnergy = std::abs(activeEnergy / values.powerFactor);
+  values.apparentEnergyImport = isLeading ? 0.0 : apparentEnergy;
+  values.apparentEnergyExport = isLeading ? apparentEnergy : 0.0;
+
+  // reactive energy — magnitude only, direction from isLeading
+  const double phi = std::acos(std::abs(values.powerFactor));
+  const double reactiveEnergy = std::sin(phi) * apparentEnergy;
+  values.reactiveEnergyImport = isLeading ? 0.0 : reactiveEnergy;
+  values.reactiveEnergyExport = isLeading ? reactiveEnergy : 0.0;
+
+  // voltages
+  const auto ppVoltage = [](double va, double vb) {
+    return std::sqrt(va * va + vb * vb + va * vb);
+  };
+
+  values.phVoltage = (values.phase1.phVoltage + values.phase2.phVoltage +
+                      values.phase3.phVoltage) /
+                     3.0;
+
+  values.phase1.ppVoltage =
+      ppVoltage(values.phase1.phVoltage, values.phase2.phVoltage);
+  values.phase2.ppVoltage =
+      ppVoltage(values.phase2.phVoltage, values.phase3.phVoltage);
+  values.phase3.ppVoltage =
+      ppVoltage(values.phase3.phVoltage, values.phase1.phVoltage);
+
+  values.ppVoltage = (values.phase1.ppVoltage + values.phase2.ppVoltage +
+                      values.phase3.ppVoltage) /
+                     3.0;
+
+  // currents
+  const auto phaseCurrent = [&values](double activePower, double phVoltage) {
+    return std::abs(activePower / (phVoltage * values.powerFactor));
+  };
+
+  values.phase1.current =
+      phaseCurrent(values.phase1.activePower, values.phase1.phVoltage);
+  values.phase2.current =
+      phaseCurrent(values.phase2.activePower, values.phase2.phVoltage);
+  values.phase3.current =
+      phaseCurrent(values.phase3.activePower, values.phase3.phVoltage);
+  values.current =
+      values.phase1.current + values.phase2.current + values.phase3.current;
+
+  json newJson;
+  json phases = json::array();
+
+  phases.push_back({
+      {"id", 1},
+      {"power_active", JsonUtils::roundTo(values.phase1.activePower, 2)},
+      {"power_apparent", JsonUtils::roundTo(values.phase1.apparentPower, 2)},
+      {"power_reactive", JsonUtils::roundTo(values.phase1.reactivePower, 2)},
+      {"power_factor", JsonUtils::roundTo(values.phase1.powerFactor, 2)},
+      {"voltage_ph", JsonUtils::roundTo(values.phase1.phVoltage, 1)},
+      {"voltage_pp", JsonUtils::roundTo(values.phase1.ppVoltage, 1)},
+      {"current", JsonUtils::roundTo(values.phase1.current, 3)},
+  });
+
+  phases.push_back({
+      {"id", 2},
+      {"power_active", JsonUtils::roundTo(values.phase2.activePower, 2)},
+      {"power_apparent", JsonUtils::roundTo(values.phase2.apparentPower, 2)},
+      {"power_reactive", JsonUtils::roundTo(values.phase2.reactivePower, 2)},
+      {"power_factor", JsonUtils::roundTo(values.phase2.powerFactor, 2)},
+      {"voltage_ph", JsonUtils::roundTo(values.phase2.phVoltage, 1)},
+      {"voltage_pp", JsonUtils::roundTo(values.phase2.ppVoltage, 1)},
+      {"current", JsonUtils::roundTo(values.phase2.current, 3)},
+  });
+
+  phases.push_back({
+      {"id", 3},
+      {"power_active", JsonUtils::roundTo(values.phase3.activePower, 2)},
+      {"power_apparent", JsonUtils::roundTo(values.phase3.apparentPower, 2)},
+      {"power_reactive", JsonUtils::roundTo(values.phase3.reactivePower, 2)},
+      {"power_factor", JsonUtils::roundTo(values.phase3.powerFactor, 2)},
+      {"voltage_ph", JsonUtils::roundTo(values.phase3.phVoltage, 1)},
+      {"voltage_pp", JsonUtils::roundTo(values.phase3.ppVoltage, 1)},
+      {"current", JsonUtils::roundTo(values.phase3.current, 3)},
+  });
+
+  newJson["time"] = values.time;
+  newJson["energy_active_import"] =
+      JsonUtils::roundTo(values.activeEnergyImport, 3);
+  newJson["energy_active_export"] =
+      JsonUtils::roundTo(values.activeEnergyExport, 3);
+  newJson["energy_apparent_import"] =
+      JsonUtils::roundTo(values.apparentEnergyImport, 3);
+  newJson["energy_apparent_export"] =
+      JsonUtils::roundTo(values.apparentEnergyExport, 3);
+  newJson["energy_reactive_import"] =
+      JsonUtils::roundTo(values.reactiveEnergyImport, 3);
+  newJson["energy_reactive_export"] =
+      JsonUtils::roundTo(values.reactiveEnergyExport, 3);
+  newJson["power_active"] = JsonUtils::roundTo(values.activePower, 2);
+  newJson["power_apparent"] = JsonUtils::roundTo(values.apparentPower, 2);
+  newJson["power_reactive"] = JsonUtils::roundTo(values.reactivePower, 2);
+  newJson["power_factor"] = JsonUtils::roundTo(values.powerFactor, 2);
+  newJson["frequency"] = JsonUtils::roundTo(values.frequency, 2);
+  newJson["voltage_ph"] = JsonUtils::roundTo(values.phVoltage, 1);
+  newJson["voltage_pp"] = JsonUtils::roundTo(values.ppVoltage, 1);
+  newJson["phases"] = phases;
+
+  // Update shared values and JSON with lock
+  {
+    std::lock_guard<std::mutex> lock(cbMutex_);
+    values_ = std::move(values);
+    jsonValues_ = std::move(newJson);
+  }
+
+  logger_->debug("{}", jsonValues_.dump());
+
+  return {};
+}
+
+std::expected<void, ModbusError> EasyMeterMaster::updateDeviceAndJson() {
+  if (!handler_.isRunning()) {
+    return std::unexpected(ModbusError::custom(
+        EINTR, "updateDeviceAndJson(): Shutdown in progress"));
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(cbMutex_);
+    if (telegram_.empty())
+      return {};
+  }
+
+  MeterTypes::Device newDevice{};
+
+  std::istringstream iss;
+  {
+    std::lock_guard<std::mutex> lock(cbMutex_);
+    iss.str(telegram_);
+  }
+
+  std::regex obexRegex(R"(^([0-9]-0:[0-9]+.[0-9]+.[0-9]+\*255)\(([^)]+)\))");
+  std::regex versionRegex(R"(^(\/[A-Za-z0-9]+)_([A-Za-z0-9]+)$)");
+  std::string line;
+
+  while (std::getline(iss, line)) {
+    line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
+
+    if (line.empty() || line[0] == '!')
+      continue;
+
+    try {
+      // Version line
+      if (!line.empty() && line[0] == '/') {
+        std::smatch versionMatch;
+        if (!std::regex_search(line, versionMatch, versionRegex)) {
+          throw std::invalid_argument("Malformed version expression");
+        }
+        newDevice.fwVersion = versionMatch[2].str();
+        continue;
+      }
+
+      // OBEX line
+      std::smatch obexMatch;
+      if (!std::regex_search(line, obexMatch, obexRegex)) {
+        throw std::invalid_argument("Malformed OBEX expression");
+      }
+
+      std::string obis = obexMatch[1];
+      if (obis == "1-0:96.1.0*255") {
+        newDevice.serialNumber = obexMatch[2].str();
+      }
+
+    } catch (const std::exception &err) {
+      std::ostringstream oss;
+      oss << "[" << line << "]: " << err.what();
+      return std::unexpected(ModbusError::custom(EPROTO, oss.str()));
+    }
+  }
+
+  newDevice.manufacturer = "EasyMeter";
+  newDevice.model = "DD3-BZ06-ETA-ODZ1";
+  newDevice.options = std::string(PROJECT_VERSION) + "-" + GIT_COMMIT_HASH;
+  newDevice.phases = 3;
+
+  // ---- Build ordered JSON ----
+  json newJson;
+
+  newJson["manufacturer"] = newDevice.manufacturer;
+  newJson["model"] = newDevice.model;
+  newJson["serial_number"] = newDevice.serialNumber;
+  newJson["firmware_version"] = newDevice.fwVersion;
+  newJson["options"] = newDevice.options;
+  newJson["phases"] = newDevice.phases;
+
+  logger_->debug("{}", newJson.dump());
+
+  // ---- Commit values ----
+  {
+    std::lock_guard<std::mutex> lock(cbMutex_);
+    jsonDevice_ = std::move(newJson);
+    device_ = std::move(newDevice);
+  }
+
+  return {};
+}
+
+void EasyMeterMaster::runLoop() {
+
+  while (handler_.isRunning()) {
+
+    // Connect to meter
+    auto connectAction = handleResult(tryConnect());
+    if (connectAction == MeterTypes::ErrorAction::SHUTDOWN)
+      break;
+    else if (connectAction == MeterTypes::ErrorAction::RECONNECT)
+      continue;
+
+    // Read telegram - on any error, loop restarts (will try reconnect)
+    auto readAction = handleResult(readTelegram());
+    if (readAction == MeterTypes::ErrorAction::SHUTDOWN)
+      break;
+    else if (readAction == MeterTypes::ErrorAction::RECONNECT)
+      continue;
+
+    // Update device
+    auto deviceAction = handleResult(updateDeviceAndJson());
+    if (deviceAction == MeterTypes::ErrorAction::SHUTDOWN)
+      break;
+    else if (deviceAction == MeterTypes::ErrorAction::RECONNECT)
+      continue;
+
+    if (handler_.isRunning()) {
+      std::lock_guard<std::mutex> lock(cbMutex_);
+      if (deviceCallback_) {
+        deviceCallback_(jsonDevice_.dump(), device_);
+      }
+    }
+
+    // Update values
+    auto updateAction = handleResult(updateValuesAndJson());
+    if (updateAction == MeterTypes::ErrorAction::SHUTDOWN)
+      break;
+    else if (updateAction == MeterTypes::ErrorAction::RECONNECT)
+      continue;
+
+    if (handler_.isRunning()) {
+      std::lock_guard<std::mutex> lock(cbMutex_);
+      if (valueCallback_) {
+        valueCallback_(jsonValues_.dump(), values_);
+      }
+    }
+  }
+
+  logger_->debug("EasyMeter '{}' run loop stopped.", cfg_.name);
+}

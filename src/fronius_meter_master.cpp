@@ -1,4 +1,4 @@
-#include "meter_master.h"
+#include "fronius_meter_master.h"
 #include "config.h"
 #include "config_yaml.h"
 #include "json_utils.h"
@@ -17,29 +17,36 @@
 
 using json = nlohmann::ordered_json;
 
-MeterMaster::MeterMaster(const MeterConfig &cfg, SignalHandler &signalHandler,
-                         std::shared_ptr<FroniusBus> bus)
-    : bus_(std::move(bus)), cfg_(cfg), handler_(signalHandler) {
+FroniusMeterMaster::FroniusMeterMaster(const MeterConfig &cfg,
+                                       SignalHandler &signalHandler,
+                                       std::shared_ptr<FroniusBus> bus)
+    : bus_(std::move(bus)), cfg_(cfg),
+      fcfg_(std::get<FroniusMeterConfig>(cfg.body)), handler_(signalHandler) {
 
-  logger_ = spdlog::get(cfg_.name + ".master");
+  // Fixed class-based logger chain: meter.master -> meter -> default.
+  // The device name is no longer part of the logger name (it already
+  // appears in every connect/disconnect message), so all meter masters
+  // share one configurable module.
+  logger_ = spdlog::get("meter.master");
   if (!logger_)
-    logger_ = spdlog::get(cfg_.name);
+    logger_ = spdlog::get("meter");
   if (!logger_)
     logger_ = spdlog::default_logger();
 
-  auto devCfg = makeDeviceConfig(cfg_);
+  auto devCfg = makeDeviceConfig(fcfg_);
   meter_ = std::make_shared<Meter>(bus_, devCfg);
   bus_->registerDevice(meter_);
 
   // --- Bus-level callbacks ---
 
   busCallbackIds_.push_back(bus_->addBusConnectCallback([this] {
-    if (cfg_.tcp) {
+    if (fcfg_.tcp) {
       auto remote = bus_->getRemoteEndpoint();
       logger_->info("Meter '{}' connected to {}:{}", cfg_.name, remote.ip,
                     remote.port);
     } else {
-      logger_->info("Meter '{}' connected at {}", cfg_.name, cfg_.rtu->device);
+      logger_->info("Meter '{}' connected at {}", cfg_.name,
+                    fcfg_.rtu->device);
     }
   }));
 
@@ -107,10 +114,10 @@ MeterMaster::MeterMaster(const MeterConfig &cfg, SignalHandler &signalHandler,
   // Start update loop thread. The loop body only runs once connected_
   // flips true, which the device-ready callback above does after
   // bus->connect() + validation.
-  worker_ = std::thread(&MeterMaster::runLoop, this);
+  worker_ = std::thread(&FroniusMeterMaster::runLoop, this);
 }
 
-MeterMaster::~MeterMaster() {
+FroniusMeterMaster::~FroniusMeterMaster() {
   // Detach from the bus before tearing down state that its callbacks
   // capture: unregisterDevice cancels any in-flight per-device retry
   // loop, and removeBusCallback synchronously waits for the bus thread
@@ -143,7 +150,7 @@ MeterMaster::~MeterMaster() {
   logger_->info("Meter '{}' disconnected", cfg_.name);
 }
 
-void MeterMaster::runLoop() {
+void FroniusMeterMaster::runLoop() {
   while (handler_.isRunning()) {
 
     if (connected_.load()) {
@@ -182,41 +189,25 @@ void MeterMaster::runLoop() {
 
     // --- Wait for next update interval ---
     std::unique_lock<std::mutex> lock(cbMutex_);
-    cv_.wait_for(lock, std::chrono::seconds(cfg_.updateInterval),
+    cv_.wait_for(lock, std::chrono::seconds(fcfg_.updateInterval),
                  [this] { return !handler_.isRunning(); });
   }
 
   logger_->debug("Modbus master run loop stopped.");
 }
 
-void MeterMaster::setValueCallback(
-    std::function<void(std::string, MeterTypes::Values)> cb) {
-  std::lock_guard<std::mutex> lock(cbMutex_);
-  valueCallback_ = std::move(cb);
-}
-
-void MeterMaster::setDeviceCallback(
-    std::function<void(std::string, MeterTypes::Device)> cb) {
-  std::lock_guard<std::mutex> lock(cbMutex_);
-  deviceCallback_ = std::move(cb);
-}
-
-void MeterMaster::setAvailabilityCallback(std::function<void(std::string)> cb) {
-  std::lock_guard<std::mutex> lock(cbMutex_);
-  availabilityCallback_ = std::move(cb);
-}
-
-std::string MeterMaster::getJsonDump() const {
+std::string FroniusMeterMaster::getJsonDump() const {
   std::lock_guard<std::mutex> lock(cbMutex_);
   return jsonValues_.dump();
 }
 
-MeterTypes::Values MeterMaster::getValues() const {
+MeterTypes::Values FroniusMeterMaster::getValues() const {
   std::lock_guard<std::mutex> lock(cbMutex_);
   return values_;
 }
 
-ModbusBusConfig MeterMaster::makeBusConfig(const MeterConfig &cfg) {
+ModbusBusConfig
+FroniusMeterMaster::makeBusConfig(const FroniusMeterConfig &cfg) {
   ModbusBusConfig busCfg;
 
   if (cfg.tcp) {
@@ -233,12 +224,17 @@ ModbusBusConfig MeterMaster::makeBusConfig(const MeterConfig &cfg) {
         .parity = parityToChar(cfg.rtu->parity),
     };
   } else {
-    throw std::runtime_error("MeterMaster: no transport configured");
+    throw std::runtime_error("FroniusMeterMaster: no transport configured");
   }
 
-  // Enable debug only if main logger is at trace level
-  auto mainLogger = spdlog::get("main");
-  busCfg.debug = mainLogger && (mainLogger->level() == spdlog::level::trace);
+  // Enable the libmodbus wire trace only if the 'bus' logger is at trace
+  // level. The hex dump is the most verbose bus diagnostic, so it sits one
+  // level below the per-transaction 'bus' debug lines: `bus: debug` yields
+  // queue/tx/rx diagnostics, `bus: trace` additionally turns on the raw
+  // libmodbus wire dump. spdlog::get returns nullptr for an unconfigured
+  // logger, so the trace stays off unless the user opts in.
+  auto busLogger = spdlog::get("bus");
+  busCfg.debug = busLogger && (busLogger->level() == spdlog::level::trace);
 
   busCfg.reconnectDelay = cfg.reconnectDelay.min;
   busCfg.reconnectDelayMax = cfg.reconnectDelay.max;
@@ -247,7 +243,8 @@ ModbusBusConfig MeterMaster::makeBusConfig(const MeterConfig &cfg) {
   return busCfg;
 }
 
-ModbusDeviceConfig MeterMaster::makeDeviceConfig(const MeterConfig &cfg) {
+ModbusDeviceConfig
+FroniusMeterMaster::makeDeviceConfig(const FroniusMeterConfig &cfg) {
   ModbusDeviceConfig devCfg;
   devCfg.slaveId = cfg.slaveId;
   devCfg.secTimeout = cfg.responseTimeout.sec;
@@ -258,7 +255,7 @@ ModbusDeviceConfig MeterMaster::makeDeviceConfig(const MeterConfig &cfg) {
   return devCfg;
 }
 
-std::expected<void, ModbusError> MeterMaster::updateValuesAndJson() {
+std::expected<void, ModbusError> FroniusMeterMaster::updateValuesAndJson() {
   if (!handler_.isRunning()) {
     return std::unexpected(ModbusError::custom(
         EINTR, "updateValuesAndJson(): Shutdown in progress"));
@@ -477,7 +474,7 @@ std::expected<void, ModbusError> MeterMaster::updateValuesAndJson() {
   return {};
 }
 
-std::expected<bool, ModbusError> MeterMaster::updateDeviceAndJson() {
+std::expected<bool, ModbusError> FroniusMeterMaster::updateDeviceAndJson() {
   if (!handler_.isRunning()) {
     return std::unexpected(ModbusError::custom(
         EINTR, "updateDeviceAndJson(): Shutdown in progress"));
@@ -507,9 +504,9 @@ std::expected<bool, ModbusError> MeterMaster::updateDeviceAndJson() {
   newDevice.phases = meter_->getPhases();
 
   // Compare received slave ID with configured
-  if (cfg_.slaveId != newDevice.slaveID) {
-    logger_->warn("Slave ID mismatch: configured {}, received {}", cfg_.slaveId,
-                  newDevice.slaveID);
+  if (fcfg_.slaveId != newDevice.slaveID) {
+    logger_->warn("Slave ID mismatch: configured {}, received {}",
+                  fcfg_.slaveId, newDevice.slaveID);
   }
 
   // ---- Build ordered JSON ----

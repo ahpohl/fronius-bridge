@@ -8,7 +8,7 @@ fronius-bridge is a lightweight service that reads operational data from one or 
 
 - Multiple inverters and meters per process, each identified by a configurable `name`
 - Reads inverter values such as power and energy
-- Reads smart meter values (Fronius TS65-a and SunSpec-compatible meters)
+- Reads smart meter values (Fronius TS65-a and SunSpec-compatible meters, and the EBZ Easymeter over a serial USB-IR head)
 - Supports Modbus over TCP (IPv4/IPv6) and serial RTU
 - Shared-bus support: any number of devices may share a single RS-485 dongle, with wire access serialised through a per-bus transaction queue
 - Manages night-time disconnections when the inverter enters standby and resumes publishing automatically
@@ -98,6 +98,19 @@ meters:
       max: 320
       exponential: true
 
+  - name: house
+    type: ebz
+    rtu:
+      device: /dev/ttyUSB1
+      baud: 9600
+      data_bits: 7
+      stop_bits: 1
+      parity: even
+    grid:
+      power_factor: 0.95
+      frequency: 50.0
+      leading: false
+
 mqtt:
   broker: localhost
   port: 1883
@@ -116,18 +129,15 @@ logger:
     main: info
     mqtt: info
     bus: info
-    primo: info
-    heatpump:
-      master: info
-      slave: info
-    grid: info
+    meter: info
+    inverter: info
 ```
 
 ### Configuration reference
 
 **Per-device fields** (each entry in `inverters:` and `meters:`):
 
-- name: Device identifier used in MQTT topics (`<topic>/inverter/<name>/...` or `<topic>/meter/<name>/...`) and as a logger module. Mandatory. Must be unique across all inverters and meters combined. Constrained to `[A-Za-z0-9_-]+` and at most 32 characters. The literals `meter`, `inverter`, `master`, `slave`, `main`, `mqtt`, and `bus` are reserved.
+- name: Device identifier used in MQTT topics (`<topic>/inverter/<name>/...` or `<topic>/meter/<name>/...`). Mandatory. Must be unique across all inverters and meters combined. Constrained to `[A-Za-z0-9_-]+` and at most 32 characters. The literals `meter` and `inverter` are reserved (they would produce a visually ambiguous topic such as `<topic>/meter/meter/values`).
 - tcp / rtu: Configure exactly one transport per device.
   - tcp.host: Hostname or IP (IPv4/IPv6) of the remote device.
   - tcp.port: Modbus TCP port (default: 502).
@@ -142,11 +152,17 @@ logger:
 
 **inverters** *(optional sequence)*: Each entry is one Fronius inverter, identified by `name`. Per-device fields apply.
 
-**meters** *(optional sequence)*: Each entry is one smart meter, identified by `name`. Per-device fields apply. Two register models are auto-detected on connect — no manual selection needed:
+**meters** *(optional sequence)*: Each entry is one smart meter, identified by `name`. A meter's `type` selects how it is read (default `fronius`):
+
+- **`type: fronius`** *(default)* — a SunSpec/Fronius meter reached over Modbus (TCP or RTU). All per-device fields above apply. Two register models are auto-detected on connect — no manual selection needed:
   - *Fronius TS65-a proprietary* — direct RTU connection to a TS65-a smart meter.
   - *SunSpec* — all other cases: meter proxied via an inverter's TCP interface (use `unit_id: 240` for the primary meter, 241 for secondary), or any standalone SunSpec-compatible meter.
+- **`type: ebz`** — an EBZ Easymeter read passively over a USB-IR head on a dedicated serial line (SML/OBIS telegrams), not Modbus. It accepts only `rtu` and an optional `grid` block; the Modbus-only keys (`tcp`, `unit_id`, `update_interval`, `response_timeout`, `reconnect_delay`) are rejected at config-load. At most one `type: ebz` meter may be configured (EBZ Easymeters are grid meters, of which an installation has one). It owns its serial line exclusively — the path may not be shared with any master or slave — and publishes as telegrams arrive rather than on a poll interval. For building the USB-IR read head and details on the EBZ Easymeter hardware itself, see the [smartmeter-gateway](https://github.com/ahpohl/smartmeter-gateway) project and its wiki. The EBZ reports only active power and energy; reactive and apparent power and energy, and per-phase currents, are derived from the `grid` assumptions:
+  - grid.power_factor: assumed power factor, range (0.0, 1.0] (default 0.95).
+  - grid.frequency: assumed grid frequency in Hz (default 50.0).
+  - grid.leading: `true` if the assumed reactive power is leading, else lagging (default false).
 
-Each meter entry may additionally carry a nested `slave:` block which exposes a SunSpec-compliant Modbus server so the inverter or another master can read this meter's values from fronius-bridge. Either TCP or RTU may be used; for the standard Fronius use case, configure TCP. The slave's RTU device path (if used) may not match any master's RTU device, and no two slaves may share an RTU device — both checks are enforced at config-load.
+Each meter entry (of either type) may additionally carry a nested `slave:` block which exposes a SunSpec-compliant Modbus server so the inverter or another master can read this meter's values from fronius-bridge. Either TCP or RTU may be used; for the standard Fronius use case, configure TCP. The slave's RTU device path (if used) may not match any master's RTU device, and no two slaves may share an RTU device — both checks are enforced at config-load.
 
 Slave fields:
 - tcp.listen: Bind address for the listener. Use `0.0.0.0` for all IPv4 interfaces (default).
@@ -165,7 +181,7 @@ Slave fields:
 
 **logger**:
 - level: Global default — `off`, `error`, `warn`, `info`, `debug`, `trace`.
-- modules: Per-module overrides using the same level values. Each device's logger resolves through a fallback chain so you can target levels with whichever granularity suits the situation: Setting `heatpump: info` therefore covers both the master and the slave of a meter named `heatpump`; split them with `heatpump.master:` / `heatpump.slave:` when wanted.
+- modules: Per-module overrides using the same level values. Loggers are fixed class-based modules, independent of device names: `meter` and `inverter` for the two device classes, plus the built-in `main`, `mqtt`, and `bus`. The `meter` module covers both meter roles; override one independently with `meter.master:` or `meter.slave:`. Resolution falls back `meter.master` → `meter` → default and `meter.slave` → `meter` → default; inverters resolve `inverter` → default. Per-device targeting is no longer available — the device name already appears in each connect/disconnect message.
 - the flat `key.subkey: value` form and the nested `key: { subkey: value }` form are equivalent — pick whichever reads better.
 
 ## Supported topologies
@@ -177,6 +193,8 @@ Slave fields:
 **Meter behind inverter (TCP proxy)** — configure a meter entry with TCP pointing at the inverter's IP and `unit_id: 240` (primary meter per the Fronius Datamanager specification; secondary starts at 241). The inverter proxies register requests to the meter on its internal RS-485 port over SunSpec. No USB dongle required, and no `slave:` block is needed since the inverter already has direct meter access.
 
 **Meter slave without inverter** — a meter entry with a `slave:` block can operate without any inverter configured. fronius-bridge reads the meter directly and serves the values over TCP (or RTU) to any Modbus master that connects.
+
+**EBZ Easymeter (serial, non-Modbus)** — a meter entry with `type: ebz` reads an EBZ Easymeter over a USB-IR head on a dedicated serial line. It does not join the shared RTU bus and is not polled; it publishes as SML/OBIS telegrams arrive. At most one EBZ meter may be configured, and its serial line must be exclusive (not shared with any Modbus master or slave); both are enforced at config-load. Like any meter it may carry a `slave:` block to re-serve its values as a SunSpec endpoint.
 
 **Shared RTU bus** — any number of inverter and meter entries may share the same physical serial dongle by setting their `rtu.device` to the same path (e.g. `/dev/ttyUSB0`). fronius-bridge serialises all wire access on a shared device through a single transaction queue, so devices are polled in turn rather than concurrently. When sharing, all RTU line parameters (`baud`, `data_bits`, `stop_bits`, `parity`) must match across the sharing devices and the `unit_id` values must be distinct; both checks are enforced at config-load. Per-device `reconnect_delay` settings on a shared bus are aggregated to a single bus-level policy by taking the minimum `min`, the minimum `max`, and OR-ing the `exponential` flags.
 
@@ -349,7 +367,7 @@ Energy counters (`energy_*`) are cumulative values maintained by the physical me
 ## Troubleshooting
 
 - **Connection timeouts** — increase `response_timeout` or `update_interval`. Verify `unit_id` and transport match the device.
-- **Meter register model not detected** — set the device-level logger to `debug` (e.g. `heatpump: debug`); the detected model is logged on connect.
+- **Meter register model not detected** — set the meter logger to `debug` (`meter: debug`, or `meter.master: debug`); the detected model is logged on connect.
 - **Meter slave not responding to inverter** — verify the meter's `slave.unit_id` matches what the inverter queries, and that `use_float_model: false` (Fronius inverters require int+sf).
 - **Shared bus diagnostics** — set `bus: debug` in `logger.modules` to see per-transaction tx/rx activity, queue depth, and slave-switch events.
 - **Frequent MQTT reconnects** — check broker reachability, credentials, and `mqtt.reconnect_delay`.

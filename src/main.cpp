@@ -1,5 +1,7 @@
 #include "config.h"
 #include "config_yaml.h"
+#include "easy_meter_master.h"
+#include "fronius_meter_master.h"
 #include "inverter_master.h"
 #include "logger.h"
 #include "meter_master.h"
@@ -14,6 +16,9 @@
 #include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
+#include <type_traits>
+#include <variant>
 #include <vector>
 
 using json = nlohmann::json;
@@ -42,6 +47,56 @@ void mergeReconnectDelay(ModbusBusConfig &dst, const ModbusBusConfig &src) {
   dst.reconnectDelay = std::min(dst.reconnectDelay, src.reconnectDelay);
   dst.reconnectDelayMax = std::min(dst.reconnectDelayMax, src.reconnectDelayMax);
   dst.exponential = dst.exponential || src.exponential;
+}
+
+// What a meter contributes to the shared-bus registry: the bus it joins and
+// the slave id it answers on. Non-bus meter kinds contribute nothing.
+struct MeterBusContribution {
+  ModbusBusConfig config;
+  int slaveId;
+};
+
+// One device's place on a shared bus, for the startup summary.
+struct BusMember {
+  std::string name;
+  int slaveId;
+};
+
+// Produce the contribution a meter makes to the shared-bus registry, or
+// std::nullopt if the meter does not use a Modbus bus.
+//
+// Dispatch is on the meter-kind variant so the bus-registry build stays
+// kind-agnostic: Fronius (Modbus) meters return a populated contribution that
+// the fold aggregates by bus key; non-bus kinds (the EBZ Easymeter, which owns
+// a dedicated serial line and never joins the shared bus) return nullopt and
+// are skipped. The std::visit is exhaustive, so adding a future meter kind
+// forces an explicit decision here rather than silently defaulting.
+std::optional<MeterBusContribution>
+tryMakeMeterBusContribution(const MeterConfig &m) {
+  return std::visit(
+      [](const auto &body) -> std::optional<MeterBusContribution> {
+        using T = std::decay_t<decltype(body)>;
+        if constexpr (std::is_same_v<T, FroniusMeterConfig>) {
+          return MeterBusContribution{FroniusMeterMaster::makeBusConfig(body),
+                                      body.slaveId};
+        } else if constexpr (std::is_same_v<T, EasyMeterConfig>) {
+          return std::nullopt;
+        } else {
+          static_assert(sizeof(T) == 0, "unhandled meter kind");
+        }
+      },
+      m.body);
+}
+
+// Human-readable transport descriptor for the startup summary, e.g.
+// "RTU 9600 8N1" or "TCP". Reconnect policy is deliberately omitted.
+std::string busTransportLabel(const ModbusBusConfig &busCfg) {
+  if (busCfg.isRtu()) {
+    const auto &r = busCfg.rtu();
+    return "RTU " + std::to_string(r.baud) + " " + std::to_string(r.dataBits) +
+           r.parity + std::to_string(r.stopBits);
+  }
+  return "TCP";
 }
 
 } // namespace
@@ -115,12 +170,16 @@ int main(int argc, char *argv[]) {
   // meterSlaves[i] is nullptr when meter i has no `slave` block.
   //
   // Declaration order matters here. Destruction runs in reverse, so:
-  //   1. inverterMasters and meterMasters destruct first. Each master's
-  //      destructor calls bus_->unregisterDevice() to cancel any in-flight
-  //      retry loop, then bus_->removeBusCallback() for each bus-level
-  //      callback the master registered. Both must see a live FroniusBus
-  //      so the bus can synchronously join its retry threads and wait out
-  //      any in-flight callback invocation.
+  //   1. inverterMasters and meterMasters destruct first. A Modbus master's
+  //      destructor (every inverter, and Fronius meters) calls
+  //      bus_->unregisterDevice() to cancel any in-flight retry loop, then
+  //      bus_->removeBusCallback() for each bus-level callback it registered;
+  //      both must see a live FroniusBus so the bus can synchronously join its
+  //      retry threads and wait out any in-flight callback invocation. An EBZ
+  //      meter master holds no bus — it owns a serial fd and a read thread —
+  //      so its destructor just joins that thread and closes the fd; it is
+  //      unaffected by `buses` below but, like the others, must destruct
+  //      before `mqtt` (see step 4).
   //   2. `buses` then drops the last shared_ptr<FroniusBus> for each bus.
   //      Each FroniusBus destructor joins its bus thread and cancels any
   //      pending transactions.
@@ -178,19 +237,45 @@ int main(int argc, char *argv[]) {
     // rather than whichever device happened to register first.
     {
       std::map<std::string, ModbusBusConfig> aggregated;
-      auto fold = [&](const ModbusBusConfig &busCfg) {
+      std::map<std::string, std::vector<BusMember>> members;
+      auto fold = [&](const ModbusBusConfig &busCfg, std::string name,
+                      int slaveId) {
         auto key = busKey(busCfg);
         auto [it, inserted] = aggregated.try_emplace(key, busCfg);
         if (!inserted)
           mergeReconnectDelay(it->second, busCfg);
+        members[key].push_back({std::move(name), slaveId});
       };
+      // Meters contribute to a bus only if they use a Modbus bus.
+      // tryMakeMeterBusContribution returns nullopt for non-bus kinds (the EBZ
+      // Easymeter, which owns a dedicated serial line), so those are skipped
+      // here and never enter the shared-bus registry.
       for (const auto &m : cfg.meters)
-        fold(MeterMaster::makeBusConfig(m));
+        if (auto c = tryMakeMeterBusContribution(m))
+          fold(c->config, m.name, c->slaveId);
       for (const auto &i : cfg.inverters)
-        fold(InverterMaster::makeBusConfig(i));
+        fold(InverterMaster::makeBusConfig(i), i.name, i.slaveId);
 
       for (auto &[key, busCfg] : aggregated)
         buses.emplace(key, std::make_shared<FroniusBus>(busCfg));
+
+      // --- Startup bus summary ---
+      // One info line per shared bus: transport parameters plus the devices
+      // (name + slave id) that share it. Emitted on the 'bus' logger at info
+      // so the wiring is visible in normal operation without enabling debug.
+      auto busLogger = spdlog::get("bus");
+      if (!busLogger)
+        busLogger = spdlog::default_logger();
+      for (const auto &[key, busCfg] : aggregated) {
+        std::string devs;
+        for (const auto &mem : members.at(key)) {
+          if (!devs.empty())
+            devs += ", ";
+          devs += mem.name + " (slave " + std::to_string(mem.slaveId) + ")";
+        }
+        busLogger->info("Bus '{}' ({}): {}", key, busTransportLabel(busCfg),
+                        devs);
+      }
     }
 
     // --- Register bus log callback ---
@@ -218,9 +303,19 @@ int main(int argc, char *argv[]) {
     meterMasters.reserve(cfg.meters.size());
     for (std::size_t i = 0; i < cfg.meters.size(); ++i) {
       const auto &mcfg = cfg.meters[i];
-      auto busCfg = MeterMaster::makeBusConfig(mcfg);
-      auto master = std::make_unique<MeterMaster>(mcfg, handler,
-                                                  buses.at(busKey(busCfg)));
+
+      // Construct the kind-appropriate master. Fronius meters attach to a
+      // shared Modbus bus (looked up by the key their bus config produces);
+      // the EBZ Easymeter owns its serial line and takes no bus. Both are
+      // held through the MeterMaster base, so the callback wiring below is
+      // identical regardless of kind.
+      std::unique_ptr<MeterMaster> master;
+      if (auto c = tryMakeMeterBusContribution(mcfg)) {
+        master = std::make_unique<FroniusMeterMaster>(
+            mcfg, handler, buses.at(busKey(c->config)));
+      } else {
+        master = std::make_unique<EasyMeterMaster>(mcfg, handler);
+      }
 
       // Raw pointer to the slave, lifetime-aligned with the master via
       // the index-aligned vectors above. nullptr when this meter has no

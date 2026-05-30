@@ -6,6 +6,7 @@
 #include <spdlog/spdlog.h>
 #include <string>
 #include <termios.h>
+#include <variant>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -94,20 +95,63 @@ struct InverterConfig {
 // ---------------------------------------------------------------------------
 // Meter config (one entry per physical meter)
 //
-// The optional `slave` block, if present, makes this meter's live values
-// available on a SunSpec Modbus endpoint (typically used to feed a Fronius
-// inverter for export limiting).
+// A meter entry has a kind-agnostic envelope (`MeterConfig`) carrying the
+// fields every meter shares — the device `name` and the optional SunSpec
+// `slave` block — plus a `body` variant holding the kind-specific transport
+// and protocol configuration.
+//
+// Two kinds are supported, selected by the YAML `type:` field (default
+// "fronius"):
+//
+//   - FroniusMeterConfig ("fronius"): a SunSpec meter reached over Modbus
+//     (TCP or RTU). Participates in the shared-bus registry and is polled on
+//     a fixed update interval.
+//
+//   - EasyMeterConfig ("ebz"): an EBZ Easymeter read passively over a
+//     dedicated serial line (SML/OBIS telegrams). It does NOT use Modbus,
+//     does NOT join the shared bus, and is event-driven rather than polled.
+//     Populated in a later patch; empty for now so the variant type is
+//     complete.
 // ---------------------------------------------------------------------------
 
-struct MeterConfig {
-  std::string name;
+// Fronius SunSpec meter reached over Modbus (TCP or RTU). These are exactly
+// the fields the former flat MeterConfig carried, minus the envelope fields
+// (`name`, `slave`) which now live on the wrapping MeterConfig.
+struct FroniusMeterConfig {
   std::optional<ModbusTcpClientConfig> tcp;
   std::optional<ModbusRtuConfig> rtu;
   int slaveId{1};
   ResponseTimeoutConfig responseTimeout;
   int updateInterval{4};
   ReconnectDelayConfig reconnectDelay;
+};
+
+// Grid assumptions for meters that report only active power (e.g. the EBZ
+// Easymeter). Reactive/apparent power and energy, and per-phase currents, are
+// derived from these assumed values since the meter does not measure them.
+struct GridConfig {
+  double powerFactor{0.95};
+  double frequency{50.0};
+  bool isLeading{false};
+};
+
+// EBZ Easymeter read passively over a dedicated serial line. Unlike a Fronius
+// meter it does not use Modbus: it owns its serial port exclusively (no shared
+// bus), is read by waiting on inbound SML/OBIS telegrams (no poll interval,
+// no slave id), and derives unmeasured quantities from `grid`.
+struct EasyMeterConfig {
+  ModbusRtuConfig rtu;
+  GridConfig grid;
+};
+
+// Kind-agnostic envelope. The optional `slave` block, if present, makes this
+// meter's live values available on a SunSpec Modbus endpoint (typically used
+// to feed a Fronius inverter for export limiting); it is independent of the
+// meter kind in `body`.
+struct MeterConfig {
+  std::string name;
   std::optional<MeterSlaveConfig> slave;
+  std::variant<FroniusMeterConfig, EasyMeterConfig> body;
 };
 
 // ---------------------------------------------------------------------------
@@ -148,6 +192,16 @@ AppConfig loadConfig(const std::string &path);
 
 inline const char *opt_c_str(const std::optional<std::string> &s) {
   return s ? s->c_str() : nullptr;
+}
+
+// Convenience accessors for the meter `body` variant. Returns nullptr when
+// the meter is not of the requested kind, so callers can branch without
+// repeating std::get_if at every site.
+inline const FroniusMeterConfig *asFronius(const MeterConfig &m) {
+  return std::get_if<FroniusMeterConfig>(&m.body);
+}
+inline const EasyMeterConfig *asEasyMeter(const MeterConfig &m) {
+  return std::get_if<EasyMeterConfig>(&m.body);
 }
 
 #endif
