@@ -37,11 +37,8 @@ InverterMaster::InverterMaster(const InverterConfig &cfg,
   busCallbackIds_.push_back(bus_->addBusConnectCallback([this] {
     if (cfg_.tcp) {
       auto remote = bus_->getRemoteEndpoint();
-      logger_->info("Inverter '{}' connected to {}:{}", cfg_.name, remote.ip,
+      logger_->info("Connected to inverter '{}' at {}:{}", cfg_.name, remote.ip,
                     remote.port);
-    } else {
-      logger_->info("Inverter '{}' connected at {}", cfg_.name,
-                    cfg_.rtu->device);
     }
   }));
 

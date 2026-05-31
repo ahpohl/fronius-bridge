@@ -74,7 +74,7 @@ EasyMeter::handleResult(std::expected<void, ModbusError> &&result) {
 
   if (err.severity == ModbusError::Severity::FATAL) {
     // Fatal error occurred - initiate shutdown sequence
-    logger_->error("FATAL EasyMeter error: {}", err.describe());
+    logger_->error("FATAL meter error: {}", err.describe());
     handler_.shutdown();
     return MeterTypes::ErrorAction::SHUTDOWN;
 
@@ -83,7 +83,7 @@ EasyMeter::handleResult(std::expected<void, ModbusError> &&result) {
     // errors (EPROTO) land here too: disconnect() closes the port, tryConnect
     // reopens it and flushes the serial buffers, so the next readTelegram
     // re-syncs the stream from scratch.
-    logger_->warn("Transient EasyMeter error: {}", err.describe());
+    logger_->warn("Transient meter error: {}", err.describe());
     disconnect();
     return MeterTypes::ErrorAction::RECONNECT;
 

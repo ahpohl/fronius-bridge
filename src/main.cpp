@@ -169,7 +169,7 @@ int main(int argc, char *argv[]) {
         for (const auto &mem : info.members) {
           if (!devs.empty())
             devs += ", ";
-          devs += mem.name + " (slave " + std::to_string(mem.slaveId) + ")";
+          devs += mem.name + " (id " + std::to_string(mem.slaveId) + ")";
         }
         busLogger->info("Bus '{}' ({}): {}", key,
                         busTransportLabel(info.config), devs);

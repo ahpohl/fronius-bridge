@@ -679,8 +679,8 @@ std::string busKeyOf(const InverterConfig &i) {
 std::string busTransportLabel(const ModbusBusConfig &cfg) {
   if (cfg.isRtu()) {
     const auto &r = cfg.rtu();
-    return "RTU " + std::to_string(r.baud) + " " + std::to_string(r.dataBits) +
-           r.parity + std::to_string(r.stopBits);
+    return std::to_string(r.dataBits) + r.parity + std::to_string(r.stopBits) +
+           ", " + std::to_string(r.baud) + " baud";
   }
   return "TCP";
 }

@@ -41,10 +41,8 @@ FroniusMeter::FroniusMeter(const MeterConfig &cfg, SignalHandler &signalHandler,
   busCallbackIds_.push_back(bus_->addBusConnectCallback([this] {
     if (fcfg_.tcp) {
       auto remote = bus_->getRemoteEndpoint();
-      logger_->info("Meter '{}' connected to {}:{}", cfg_.name, remote.ip,
+      logger_->info("Connected to meter '{}' at {}:{}", cfg_.name, remote.ip,
                     remote.port);
-    } else {
-      logger_->info("Meter '{}' connected at {}", cfg_.name, fcfg_.rtu->device);
     }
   }));
 
