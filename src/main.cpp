@@ -157,14 +157,18 @@ int main(int argc, char *argv[]) {
       buses.emplace(key, std::make_shared<FroniusBus>(info.config));
 
     // --- Startup bus summary ---
-    // One info line per shared bus: transport parameters plus the devices
-    // (name + slave id) that share it. Emitted on the 'bus' logger at info
+    // One info line per shared RTU bus: line parameters plus the devices
+    // (name + unit id) that share it. Emitted on the 'bus' logger at info
     // so the wiring is visible in normal operation without enabling debug.
+    // TCP entries are skipped: a Modbus TCP connection is point-to-point,
+    // not a shared medium, so it is not a bus in this sense.
     {
       auto busLogger = spdlog::get("bus");
       if (!busLogger)
         busLogger = spdlog::default_logger();
       for (const auto &[key, info] : cfg.buses) {
+        if (!info.config.isRtu())
+          continue;
         std::string devs;
         for (const auto &mem : info.members) {
           if (!devs.empty())
