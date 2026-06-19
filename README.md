@@ -8,11 +8,12 @@ fronius-bridge is a lightweight service that reads operational data from one or 
 
 - Multiple inverters and meters per process, each identified by a configurable `name`
 - Reads inverter values such as power and energy
-- Reads smart meter values (Fronius TS65-a and SunSpec-compatible meters, and the EBZ Easymeter over a serial USB-IR head)
+- Reads smart meter values (Fronius TS 65A-3 and SunSpec-compatible meters, and the EBZ [Easymeter](https://github.com/ahpohl/smartmeter-gateway/wiki/IR-dongle-pcb) over a serial USB-IR head)
 - Supports Modbus over TCP (IPv4/IPv6) and serial RTU
 - Shared-bus support: any number of devices may share a single RS-485 dongle, with wire access serialised through a per-bus transaction queue
 - Manages night-time disconnections when the inverter enters standby and resumes publishing automatically
 - Publishes values, events, device info and connection availability as JSON to an MQTT broker
+- Optional PostgreSQL/TimescaleDB persistence, with one schema per device, nightly per-day energy rollups, and a whole-site daily rollup (see [Site energy](#site-energy) and [DEPLOYMENT.md](DEPLOYMENT.md))
 - Fully configurable through a YAML configuration file
 - Extensive, module-scoped logging with device-name-aware levels
 - Automatic detection of register model, number of phases, MPPT tracker inputs, and hybrid/storage capability
@@ -28,7 +29,6 @@ Both `inverters:` and `meters:` are optional sequences; at least one device acro
 ## Status and limitations
 
 - Battery/storage data is detected but not yet supported.
-- A PostgreSQL consumer is planned but not implemented yet.
 - TLS in libmosquitto not yet supported.
 
 ## Dependencies
@@ -37,6 +37,12 @@ Both `inverters:` and `meters:` are optional sequences; at least one device acro
 - [libmosquitto](https://mosquitto.org/) — MQTT client library
 - [yaml-cpp](https://github.com/jbeder/yaml-cpp) — YAML configuration parsing
 - [spdlog](https://github.com/gabime/spdlog) — Structured logging
+- [libpq](https://www.postgresql.org/docs/current/libpq.html) — PostgreSQL client
+
+The optional PostgreSQL consumer additionally requires a PostgreSQL server with the
+**TimescaleDB** extension in the bridge's database; the nightly energy rollup also
+uses **pg_cron**, which may live in a separate database on the cluster. See
+[DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Configuration
 
@@ -45,23 +51,34 @@ fronius-bridge is configured via a YAML file passed with `-c <path>` (or the `FR
 ### Example config
 
 ```yaml
+# ================================
+# fronius-bridge — configuration
+# ================================
+#
+# Example devices:
+# ----------------
+# 1. Fronius Primo 4.0 inverter
+# 2. Primary grid EBZ Easymeter
+# 3. Secondary Fronius TS 65A-3 meter only for heat pump
+
+site:
+  # New York city timesquare
+  latitude: 40.7589
+  longitude: -73.9851
+  horizon: -0.833
+
 inverters:
   - name: primo
-    tcp:
-      host: primo.home.arpa
-      port: 502
+    rtu:
+      device: /dev/ttyUSB0
     unit_id: 1
-    response_timeout:
-      sec: 5
-      usec: 0
+    response_timeout: { sec: 5, usec: 0 }
     update_interval: 4
-    reconnect_delay:
-      min: 5
-      max: 320
-      exponential: true
+    reconnect_delay: { min: 5, max: 320, exponential: true }
 
 meters:
   - name: heatpump
+    location: consumption
     rtu:
       device: /dev/ttyUSB0
       baud: 9600
@@ -69,14 +86,9 @@ meters:
       stop_bits: 1
       parity: none
     unit_id: 2
-    response_timeout:
-      sec: 5
-      usec: 0
-    update_interval: 4
-    reconnect_delay:
-      min: 5
-      max: 320
-      exponential: true
+    response_timeout: { sec: 5, usec: 0 }
+    update_interval: 2
+    reconnect_delay: { min: 5, max: 320, exponential: true }
     slave:
       tcp:
         listen: 0.0.0.0
@@ -85,21 +97,9 @@ meters:
       use_float_model: false
 
   - name: grid
-    tcp:
-      host: primo.home.arpa
-      port: 502
-    unit_id: 240
-    response_timeout:
-      sec: 5
-      usec: 0
-    update_interval: 4
-    reconnect_delay:
-      min: 5
-      max: 320
-      exponential: true
-
-  - name: house
     type: ebz
+    location: consumption
+    primary: true
     rtu:
       device: /dev/ttyUSB1
       baud: 9600
@@ -107,30 +107,41 @@ meters:
       stop_bits: 1
       parity: even
     grid:
-      power_factor: 0.95
-      frequency: 50.0
-      leading: false
+      power_factor: 0.98
+      leading: false    # false = inductive (lagging), true = capacitive (leading)
+      frequency: 50.00
+    slave:
+      tcp:
+        listen: 0.0.0.0
+        port: 502
+      unit_id: 1
+      use_float_model: false
 
 mqtt:
   broker: localhost
   port: 1883
   topic: fronius-bridge
   #user: mqtt
-  #password: "your-secret-password"
+  #password: "your-secure-password"
   queue_size: 100
-  reconnect_delay:
-    min: 2
-    max: 64
-    exponential: true
+  reconnect_delay: { min: 2, max: 64, exponential: true }
+
+postgres:
+  dsn: "host=localhost port=5432 dbname=fronius user=fronius_bridge password=your-secure-password"
+  queue_size: 10000
+  reconnect_delay: { min: 2, max: 64, exponential: true }
 
 logger:
   level: info
   modules:
     main: info
-    mqtt: info
     bus: info
-    meter: info
+    mqtt: info
+    postgres: info
     inverter: info
+    meter:
+      master: info
+      slave: info
 ```
 
 ### Configuration reference
@@ -155,12 +166,16 @@ logger:
 **meters** *(optional sequence)*: Each entry is one smart meter, identified by `name`. A meter's `type` selects how it is read (default `fronius`):
 
 - **`type: fronius`** *(default)* — a SunSpec/Fronius meter reached over Modbus (TCP or RTU). All per-device fields above apply. Two register models are auto-detected on connect — no manual selection needed:
-  - *Fronius TS65-a proprietary* — direct RTU connection to a TS65-a smart meter.
+  - *Fronius TS 65A-3 proprietary* — direct RTU connection to a TS 65A-3 smart meter.
   - *SunSpec* — all other cases: meter proxied via an inverter's TCP interface (use `unit_id: 240` for the primary meter, 241 for secondary), or any standalone SunSpec-compatible meter.
-- **`type: ebz`** — an EBZ Easymeter read passively over a USB-IR head on a dedicated serial line (SML/OBIS telegrams), not Modbus. It accepts only `rtu` and an optional `grid` block; the Modbus-only keys (`tcp`, `unit_id`, `update_interval`, `response_timeout`, `reconnect_delay`) are rejected at config-load. At most one `type: ebz` meter may be configured (EBZ Easymeters are grid meters, of which an installation has one). It owns its serial line exclusively — the path may not be shared with any master or slave — and publishes as telegrams arrive rather than on a poll interval. For building the USB-IR read head and details on the EBZ Easymeter hardware itself, see the [smartmeter-gateway](https://github.com/ahpohl/smartmeter-gateway) project and its wiki. The EBZ reports only active power and energy; reactive and apparent power and energy, and per-phase currents, are derived from the `grid` assumptions:
+- **`type: ebz`** — an EBZ Easymeter read passively over a USB-IR head on a dedicated serial line (SML/OBIS telegrams), not Modbus. It accepts only `rtu` and an optional `grid` block; the Modbus-only keys (`tcp`, `unit_id`, `update_interval`, `response_timeout`, `reconnect_delay`) are rejected at config-load. It owns its serial line exclusively — the path may not be shared with any master or slave — and publishes as telegrams arrive rather than on a poll interval. At most one `type: ebz` meter may be configured, since an installation has a single grid meter. For building the USB-IR read head and the meter hardware itself, see the [smartmeter-gateway](https://github.com/ahpohl/smartmeter-gateway) project and its wiki. The EBZ reports only active power and energy; reactive and apparent quantities and per-phase currents are derived from the `grid` assumptions:
   - grid.power_factor: assumed power factor, range (0.0, 1.0] (default 0.95).
   - grid.frequency: assumed grid frequency in Hz (default 50.0).
   - grid.leading: `true` if the assumed reactive power is leading, else lagging (default false).
+
+A meter of either type may also declare its role in the whole-site energy rollup (see [Site energy](#site-energy)):
+- location: `feed-in` or `consumption` — where the primary meter sits in the wiring, which selects how the daily rollup derives self-consumption (see [Grid meter placement](#grid-meter-placement)). Optional; a meter without `location` is still recorded but takes no special role in the rollup.
+- primary: `true` marks the one meter whose `location` defines the site's grid reference and therefore selects the rollup regime. At most one meter may be `primary`, and `primary` requires `location`; both are enforced at config-load. Secondary consumption meters (e.g. a heat pump) are informational sub-loads and are not summed into site consumption.
 
 Each meter entry (of either type) may additionally carry a nested `slave:` block which exposes a SunSpec-compliant Modbus server so the inverter or another master can read this meter's values from fronius-bridge. Either TCP or RTU may be used; for the standard Fronius use case, configure TCP. The slave's RTU device path (if used) may not match any master's RTU device, and no two slaves may share an RTU device — both checks are enforced at config-load.
 
@@ -172,16 +187,28 @@ Slave fields:
 - idle_timeout: Seconds of inactivity after which the client is treated as gone. In TCP mode the idle client is disconnected; in RTU mode the listener keeps running and simply marks the client inactive in the log.
 - use_float_model: `false` (default) exposes int+sf registers (Fronius-compatible); `true` exposes 32-bit IEEE 754 float registers.
 
+**site** *(optional)*: The installation's coordinates, used to compute the local daylight window for the inverter's daily-rollup quality flags. Recommended whenever the PostgreSQL rollup is enabled — without coordinates the inverter's `coverage` and `continuity` fall back to the full 24h day, which a daylight-only inverter can never satisfy, so its days never flag `complete` / `continuous` (see [Site energy](#site-energy)).
+- latitude: Decimal degrees, range [-90, 90] (north positive). Drives the length of the daylight window.
+- longitude: Decimal degrees, range [-180, 180] (east positive). Needed alongside `latitude` for the daylight calculation; it sets the solar clock, while the window length is latitude-driven.
+- horizon: Sun-centre altitude in degrees counted as sunrise/sunset, range [-18, 20] (default -0.833, standard refraction plus solar radius). If a clear day's inverter coverage lands just over 1.0, lower this to match what the SunSpec interface reports.
+
 **mqtt**: Connection to the MQTT broker.
-- broker / port: Broker hostname and port (1883 unencrypted, 8883 TLS).
+- broker / port: Broker hostname and port. 1883 is the plaintext default; TLS (8883) is not yet supported.
 - topic: Base topic — subtopics (`/<class>/<name>/values`, etc.) are appended automatically. See [MQTT publishing](#mqtt-publishing).
 - user / password: Optional broker authentication.
 - queue_size: Per-topic publish queue depth. Messages beyond this limit are dropped.
 - reconnect_delay: Same semantics as the per-device `reconnect_delay`.
 
+**postgres** *(optional)*: Enables the PostgreSQL/TimescaleDB consumer. Omit the whole section to run MQTT-only. Each device is written into its own schema named after the device (`name`); full database setup, rollups, and query patterns are described in [DEPLOYMENT.md](DEPLOYMENT.md).
+- dsn: libpq connection string (e.g. `host=localhost port=5432 dbname=fronius user=fronius_bridge password=...`). Mandatory when the section is present.
+- queue_size: In-memory worker queue depth. When full, the oldest events are dropped (newer telemetry wins). Default 10000.
+- reconnect_delay: Same semantics as the per-device `reconnect_delay`; governs the worker's connect/reconnect backoff.
+
+On startup the worker verifies the `timescaledb` extension is installed in its database and, by default, creates or upgrades each device's schema on first sight. The `--no-migrate` command-line flag switches this to verify-only (the schemas must already exist); it has no effect without a `postgres` section. The nightly energy rollup additionally uses `pg_cron`, which is set up separately (and may live in another database); see [DEPLOYMENT.md](DEPLOYMENT.md).
+
 **logger**:
 - level: Global default — `off`, `error`, `warn`, `info`, `debug`, `trace`.
-- modules: Per-module overrides using the same level values. Loggers are fixed class-based modules, independent of device names: `meter` and `inverter` for the two device classes, plus the built-in `main`, `mqtt`, and `bus`. The `meter` module covers both meter roles; override one independently with `meter.master:` or `meter.slave:`. Resolution falls back `meter.master` → `meter` → default and `meter.slave` → `meter` → default; inverters resolve `inverter` → default. Per-device targeting is no longer available — the device name already appears in each connect/disconnect message.
+- modules: Per-module overrides using the same level values. Loggers are fixed class-based modules, independent of device names: `meter` and `inverter` for the two device classes, plus the built-in `main`, `mqtt`, and `bus`. The `meter` module covers both meter roles; override one independently with `meter.master:` or `meter.slave:`. Per-device targeting is not available — the device name already appears in each connect/disconnect message.
 - the flat `key.subkey: value` form and the nested `key: { subkey: value }` form are equivalent — pick whichever reads better.
 
 ## Supported topologies
@@ -199,6 +226,46 @@ Slave fields:
 **Shared RTU bus** — any number of inverter and meter entries may share the same physical serial dongle by setting their `rtu.device` to the same path (e.g. `/dev/ttyUSB0`). fronius-bridge serialises all wire access on a shared device through a single transaction queue, so devices are polled in turn rather than concurrently. When sharing, all RTU line parameters (`baud`, `data_bits`, `stop_bits`, `parity`) must match across the sharing devices and the `unit_id` values must be distinct; both checks are enforced at config-load. Per-device `reconnect_delay` settings on a shared bus are aggregated to a single bus-level policy by taking the minimum `min`, the minimum `max`, and OR-ing the `exponential` flags.
 
 **Multiple devices of either kind** — `inverters:` and `meters:` are sequences, so any combination of devices is supported. Each entry carries its own `name`, transport, and (for meters) optional `slave:` block. MQTT topics route per-device through the `<class>/<name>` segments — see [MQTT publishing](#mqtt-publishing).
+
+## Grid meter placement
+
+The whole-site rollup needs to know where the **primary** meter sits in the wiring, because that fixes what it can physically measure — and therefore how each day's production and consumption split into self-consumption (PV used on site) and grid import/export. fronius-bridge supports the two placements Fronius documents for its Smart Meter, selected by the primary meter's `location`:
+
+![Grid meter placement](docs/meter-placement.svg)
+
+In both placements the production and consumption *totals* come from gap-immune counter rollups — each inverter's `produced_kwh` and the consumption meter's import counter `imported_kwh`. Reading a cumulative counter near both day edges captures everything in between, so the totals are exact and agree across regimes. The placements differ only in how those totals divide into self-consumption and grid exchange.
+
+### Feed-in point: `location: feed-in` (Regime A, measured)
+
+The primary meter is a bidirectional meter at the grid connection point, ahead of the PV junction, so it measures net import and export directly. The split is then exact arithmetic — nothing is estimated:
+
+```
+production       = sum of every inverter's produced_kwh
+from_grid        = primary meter's imported counter
+to_grid          = primary meter's exported counter
+self_consumption = max(production - to_grid, 0)
+consumption      = self_consumption + from_grid
+```
+
+### Consumption path: `location: consumption` (Regime B, simulated)
+
+This is a 100% feed-in installation: all generation is exported and the house draws entirely from the grid, so the primary meter — wired in the consumption branch, past the PV junction — sees only house load. Self-consumption is never directly measured, so it alone is estimated, from the time-aligned overlap of PV production power and house consumption power over 30-second buckets (Pb = summed inverter power, Cb = primary consumption-meter power, both ≥ 0):
+
+```
+self_consumption = sum of min(Pb, Cb)        -- then clamped to <= production and consumption
+to_grid          = production  - self_consumption
+from_grid        = consumption - self_consumption
+```
+
+Production and consumption stay the counter totals above; only the split is estimated, and the grid legs follow by subtraction, so both energy balances stay exact and non-negative. Because the overlap uses bucket *averages* the estimate is slightly optimistic, but the 30-second resolution keeps that bias small. A mid-day data gap biases it low instead — which the `continuous` flag catches (see [Site energy](#site-energy)).
+
+## Site energy
+
+When the PostgreSQL consumer is enabled and a meter is marked `primary`, fronius-bridge maintains a whole-site daily rollup in `public.site_energy` — one row per day with production, consumption, self-consumption, and grid import/export, all in kWh. The table stores energy quantities only; ratios such as self-sufficiency (self-consumption / consumption) and self-usage (self-consumption / production) follow trivially from those columns and are left to the dashboard. The rollup is computed by `public.compute_site_energy()` and scheduled alongside the per-device rollups; setup, a function reference, and queries are in [DEPLOYMENT.md](DEPLOYMENT.md#daily-rollups-with-pg_cron).
+
+Devices announce their role through a small `public.device_registry` table that the bridge keeps in sync with the configuration on every startup (one row per device: its kind, and for meters their `location` and `primary` flag). The rollup reads the registry, so it needs no hardcoded device names and adapts as devices are added or removed. How each day's totals split into self-consumption and grid exchange is set by where the primary meter sits — see [Grid meter placement](#grid-meter-placement).
+
+Each day carries two quality flags — `complete` and `continuous` — so questionable rows can be filtered or annotated (e.g. dimmed in Grafana) rather than silently trusted. They mirror the flags the per-device `daily` rows carry and are aggregated the same way: the site's `complete` is true only when every contributing device-day was itself complete (its samples spanned the day — `coverage`), and the site's `continuous` is true only when every one was itself continuous (its 30-second buckets densely cover the expected window — `continuity ≥ 0.90`). The two are independent and stored separately. Because `complete` is span-based it cannot see a mid-day outage, so a consumer trusts the measured regime on `complete` alone — its counter arithmetic is gap-immune, making `continuous` merely informational there — and the simulated regime on `complete AND continuous`, since its self-consumption split is summed from those buckets. A Regime B day with a mid-day gap therefore reads `complete` true but `continuous` false.
 
 ## MQTT publishing
 
@@ -278,7 +345,7 @@ For example, with `mqtt.topic: fronius-bridge` and a meter named `heatpump`, the
 - Topic: `<topic>/meter/<name>/device`
   ```jsonc
   {
-    "manufacturer": "Fronius", "model": "TS65-a-3", "serial_number": "12345678",
+    "manufacturer": "Fronius", "model": "TS 65A-3", "serial_number": "12345678",
     "firmware_version": "1.3.0", "data_manager": "",
     "register_model": "proprietary", "slave_id": 1, "meter_id": 203, "phases": 1
   }
@@ -360,7 +427,7 @@ For example, with `mqtt.topic: fronius-bridge` and a meter named `heatpump`, the
 
 ### Conventions
 
-Energy counters (`energy_*`) are cumulative values maintained by the physical meter, published in kWh/kVAh/kvarh. The application does not reset them on restart. Compute per-interval deltas in your consumer by differencing successive readings.
+Energy counters (`energy_*`) are cumulative values maintained by the physical meter, published in kWh/kVAh/kvarh. The application does not reset them on restart.
 
 `power_active` uses the load convention: positive = import from grid, negative = export to grid. `power_factor` and `ac_power_factor` are percentages in the range -100..100.
 
@@ -369,7 +436,7 @@ Energy counters (`energy_*`) are cumulative values maintained by the physical me
 - **Connection timeouts** — increase `response_timeout` or `update_interval`. Verify `unit_id` and transport match the device.
 - **Meter register model not detected** — set the meter logger to `debug` (`meter: debug`, or `meter.master: debug`); the detected model is logged on connect.
 - **Meter slave not responding to inverter** — verify the meter's `slave.unit_id` matches what the inverter queries, and that `use_float_model: false` (Fronius inverters require int+sf).
-- **Shared bus diagnostics** — set `bus: debug` in `logger.modules` to see per-transaction tx/rx activity, queue depth, and slave-switch events.
+- **Shared bus diagnostics** — set `bus: debug` in `logger.modules` to see per-transaction tx/rx activity, queue depth, and slave-switch events; `bus: trace` adds the low-level libmodbus telegrams.
 - **Frequent MQTT reconnects** — check broker reachability, credentials, and `mqtt.reconnect_delay`.
 
 ## Security

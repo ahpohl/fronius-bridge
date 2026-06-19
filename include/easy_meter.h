@@ -1,6 +1,7 @@
 #ifndef EASY_METER_H_
 #define EASY_METER_H_
 
+#include "change_gate.h"
 #include "config_yaml.h"
 #include "meter_master.h"
 #include "meter_types.h"
@@ -81,6 +82,12 @@ private:
   SignalHandler &handler_;
   std::condition_variable cv_;
   std::thread worker_;
+
+  // The EBZ re-parses its identity from every SML telegram, so emit the device
+  // callback only when that identity actually changes (otherwise the device
+  // would be republished once per telegram). runLoop touches this only from
+  // the single poll thread.
+  ChangeGate<MeterTypes::Device> deviceGate_;
 };
 
 #endif /* EASY_METER_H_ */

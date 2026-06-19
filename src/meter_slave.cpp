@@ -191,39 +191,39 @@ void MeterSlave::updateValues(MeterTypes::Values values) {
               static_cast<size_t>(newRegs->nb_registers) * sizeof(uint16_t));
 
   logger_->debug(
-      "Meter values:\n"
+      "Meter '{}' values:\n"
       "  time              : {}\n"
-      "  energy import : P={:.0f}Wh Q={:.0f}varh S={:.0f}VAh\n"
-      "  energy export : P={:.0f}Wh Q={:.0f}varh S={:.0f}VAh\n"
-      "  phVoltage         : {:.1f} V\n"
-      "  ppVoltage         : {:.1f} V\n"
-      "  current           : {:.3f} A\n"
-      "  activePower       : {:.2f} W\n"
-      "  reactivePower     : {:.2f} var\n"
-      "  apparentPower     : {:.2f} VA\n"
-      "  powerFactor       : {:.2f}\n"
-      "  frequency         : {:.2f} Hz\n"
-      "  phase1 phV={:.1f}V ppV={:.1f}V I={:.3f}A P={:.2f}W Q={:.2f}var "
-      "S={:.2f}VA PF={:.2f}\n"
-      "  phase2 phV={:.1f}V ppV={:.1f}V I={:.3f}A P={:.2f}W Q={:.2f}var "
-      "S={:.2f}VA PF={:.2f}\n"
-      "  phase3 phV={:.1f}V ppV={:.1f}V I={:.3f}A P={:.2f}W Q={:.2f}var "
-      "S={:.2f}VA PF={:.2f}",
-      values.time, values.activeEnergyImport, values.reactiveEnergyImport,
-      values.apparentEnergyImport, values.activeEnergyExport,
-      values.reactiveEnergyExport, values.apparentEnergyExport,
-      values.phVoltage, values.ppVoltage, values.current, values.activePower,
-      values.reactivePower, values.apparentPower, values.powerFactor,
-      values.frequency, values.phase1.phVoltage, values.phase1.ppVoltage,
-      values.phase1.current, values.phase1.activePower,
-      values.phase1.reactivePower, values.phase1.apparentPower,
-      values.phase1.powerFactor, values.phase2.phVoltage,
-      values.phase2.ppVoltage, values.phase2.current, values.phase2.activePower,
-      values.phase2.reactivePower, values.phase2.apparentPower,
-      values.phase2.powerFactor, values.phase3.phVoltage,
-      values.phase3.ppVoltage, values.phase3.current, values.phase3.activePower,
-      values.phase3.reactivePower, values.phase3.apparentPower,
-      values.phase3.powerFactor);
+      "  energy import : P={}Wh Q={}varh S={}VAh\n"
+      "  energy export : P={}Wh Q={}varh S={}VAh\n"
+      "  phVoltage         : {} V\n"
+      "  ppVoltage         : {} V\n"
+      "  current           : {} A\n"
+      "  activePower       : {} W\n"
+      "  reactivePower     : {} var\n"
+      "  apparentPower     : {} VA\n"
+      "  powerFactor       : {}\n"
+      "  frequency         : {} Hz\n"
+      "  phase1 phV={}V ppV={}V I={}A P={}W Q={}var "
+      "S={}VA PF={}\n"
+      "  phase2 phV={}V ppV={}V I={}A P={}W Q={}var "
+      "S={}VA PF={}\n"
+      "  phase3 phV={}V ppV={}V I={}A P={}W Q={}var "
+      "S={}VA PF={}",
+      name_, values.time, values.activeEnergyImport,
+      values.reactiveEnergyImport, values.apparentEnergyImport,
+      values.activeEnergyExport, values.reactiveEnergyExport,
+      values.apparentEnergyExport, values.phVoltage, values.ppVoltage,
+      values.current, values.activePower, values.reactivePower,
+      values.apparentPower, values.powerFactor, values.frequency,
+      values.phase1.phVoltage, values.phase1.ppVoltage, values.phase1.current,
+      values.phase1.activePower, values.phase1.reactivePower,
+      values.phase1.apparentPower, values.phase1.powerFactor,
+      values.phase2.phVoltage, values.phase2.ppVoltage, values.phase2.current,
+      values.phase2.activePower, values.phase2.reactivePower,
+      values.phase2.apparentPower, values.phase2.powerFactor,
+      values.phase3.phVoltage, values.phase3.ppVoltage, values.phase3.current,
+      values.phase3.activePower, values.phase3.reactivePower,
+      values.phase3.apparentPower, values.phase3.powerFactor);
 
   if (cfg_.useFloatModel) {
     handleResult(ModbusUtils::packToModbus<float>(newRegs.get(), M21X::PF,

@@ -7,6 +7,7 @@
 #include "meter_master.h"
 #include "meter_slave.h"
 #include "mqtt_client.h"
+#include "postgres_client.h"
 #include "privileges.h"
 #include "signal_handler.h"
 #include <CLI/CLI.hpp>
@@ -50,6 +51,12 @@ int main(int argc, char *argv[]) {
                  "Drop privileges to this group after startup")
       ->envname("FRONIUS_GROUP");
 
+  bool noMigrate = false;
+  app.add_flag(
+      "--no-migrate", noMigrate,
+      "Verify the PostgreSQL schema for each device instead of "
+      "creating or upgrading it (no effect without a postgres config)");
+
   CLI11_PARSE(app, argc, argv);
 
   // --- Load config ---
@@ -67,6 +74,11 @@ int main(int argc, char *argv[]) {
   if (!mainLogger)
     mainLogger = spdlog::default_logger();
   mainLogger->info("Starting {} with config '{}'", PROJECT_NAME, config);
+
+  // --no-migrate downgrades the per-device schema setup from create/upgrade to
+  // verify-only. Harmless when postgres is not configured.
+  if (cfg.postgres && noMigrate)
+    cfg.postgres->autoMigrate = false;
 
   // Warn if --user/--group specified but not running as root
   if (!Privileges::isRoot() && !runUser.empty()) {
@@ -107,7 +119,11 @@ int main(int argc, char *argv[]) {
   //      own listener thread and modbus context.
   //   4. mqtt destructs last among the I/O objects so that final
   //      availability publishes from master destructors land successfully.
+  //      The optional PostgresClient sits with mqtt: it is a peer consumer the
+  //      master callbacks feed, so it must outlive every master. It joins its
+  //      own worker thread on destruction.
   std::unique_ptr<MqttClient> mqtt;
+  std::unique_ptr<PostgresClient> postgres;
   std::vector<std::unique_ptr<MeterSlave>> meterSlaves;
   std::map<std::string, std::shared_ptr<FroniusBus>> buses;
   std::vector<std::unique_ptr<MeterMaster>> meterMasters;
@@ -145,55 +161,68 @@ int main(int argc, char *argv[]) {
     // --- Start MQTT client ---
     mqtt = std::make_unique<MqttClient>(cfg.mqtt, handler);
 
-    // --- Build bus registry ---
+    // --- Start optional PostgreSQL consumer ---
+    // Constructed only when a postgres section is present; otherwise the
+    // bridge runs MQTT-only. The worker connects lazily, so a database that
+    // is down at startup does not block anything here.
+    if (cfg.postgres) {
+      // cfg.deviceRegistry is the derived per-device roster (built by
+      // loadConfig, like cfg.buses); the consumer writes it into
+      // public.device_registry at startup.
+      postgres = std::make_unique<PostgresClient>(
+          *cfg.postgres, cfg.deviceRegistry, cfg.site, handler);
+      mainLogger->info("PostgreSQL consumer enabled ({} mode)",
+                       cfg.postgres->autoMigrate ? "migrate" : "verify");
+    } else {
+      mainLogger->info("PostgreSQL consumer disabled");
+    }
+
+    // --- Build bus registry + startup summary ---
     // cfg.buses is the derived, deduplicated set of buses (one per unique
     // RS-485 device path or TCP endpoint), synthesised by loadConfig() from
     // the inverter and meter sections — reconnect-delay already aggregated
-    // across devices that share a bus. Each entry becomes exactly one
-    // FroniusBus; devices sharing a physical line share the instance and
-    // serialise wire access through it. No hardware is opened until the
-    // connect() calls further below.
-    for (const auto &[key, info] : cfg.buses)
-      buses.emplace(key, std::make_shared<FroniusBus>(info.config));
+    // across devices that share a bus. A single pass turns each entry into
+    // exactly one FroniusBus (devices sharing a physical line share the
+    // instance and serialise wire access through it) and logs one info line
+    // describing it, so the wiring is visible in normal operation without
+    // enabling debug. busSummaryLine() covers both transports; the EBZ
+    // Easymeter reads a dedicated SML serial line, never joins a bus, and is
+    // absent here. No hardware is opened until the connect() calls below.
+    //
+    // The 'bus' logger is dedicated so per-bus output can be silenced or
+    // surfaced independently of the main and per-device modules; resolve it
+    // once here for both the summary and the diagnostic callback below.
+    auto busLogger = spdlog::get("bus");
 
-    // --- Startup bus summary ---
-    // One info line per shared RTU bus: line parameters plus the devices
-    // (name + unit id) that share it. Emitted on the 'bus' logger at info
-    // so the wiring is visible in normal operation without enabling debug.
-    // TCP entries are skipped: a Modbus TCP connection is point-to-point,
-    // not a shared medium, so it is not a bus in this sense.
-    {
-      auto busLogger = spdlog::get("bus");
-      if (!busLogger)
-        busLogger = spdlog::default_logger();
-      for (const auto &[key, info] : cfg.buses) {
-        if (!info.config.isRtu())
-          continue;
-        std::string devs;
-        for (const auto &mem : info.members) {
-          if (!devs.empty())
-            devs += ", ";
-          devs += mem.name + " (id " + std::to_string(mem.slaveId) + ")";
-        }
-        busLogger->info("Bus '{}' ({}): {}", key,
-                        busTransportLabel(info.config), devs);
-      }
+    // Decide the libmodbus wire trace here, not in makeBusConfig(): the bus
+    // registry is built during loadConfig(), before setupLogging() has
+    // registered any logger, so the flag cannot be resolved at config-build
+    // time. The hex dump is the most verbose bus diagnostic and sits one level
+    // below the per-transaction 'bus' debug lines: `bus: debug` yields
+    // queue/tx/rx diagnostics, `bus: trace` additionally turns on the raw
+    // libmodbus wire dump. Only a dedicated 'bus' logger at trace level opts
+    // in — a global trace level does not, matching the original behaviour.
+    const bool busTrace =
+        busLogger && busLogger->level() == spdlog::level::trace;
+
+    if (!busLogger)
+      busLogger = spdlog::default_logger();
+    for (const auto &[key, info] : cfg.buses) {
+      ModbusBusConfig busCfg = info.config;
+      busCfg.debug = busTrace;
+      buses.emplace(key, std::make_shared<FroniusBus>(busCfg));
+      busLogger->info("{}", busSummaryLine(key, info));
     }
 
     // --- Register bus log callback ---
     // Per-bus diagnostic output (queue depth, slave switches, tx/rx
-    // outcomes) goes to its own 'bus' logger so it can be silenced or
-    // surfaced independently of the main and per-device modules. spdlog
-    // defaults to info-level for unregistered loggers, so by default these
-    // debug-level lines are filtered out; users opt in with `bus: debug`
-    // (or `trace`) in the YAML logger.modules section.
-    auto busLogger = spdlog::get("bus");
-    if (!busLogger)
-      busLogger = spdlog::default_logger();
-    for (auto &[key, bus] : buses) {
+    // outcomes) goes to the same 'bus' logger at debug level. spdlog
+    // defaults to info-level for unregistered loggers, so these lines are
+    // filtered out by default; users opt in with `bus: debug` (or `trace`)
+    // in the YAML logger.modules section.
+    for (auto &[key, bus] : buses)
       bus->addBusLogCallback(
           [busLogger](const std::string &msg) { busLogger->debug("{}", msg); });
-    }
 
     // --- Start meter masters ---
     // Each meter master's value/device callbacks publish to MQTT under
@@ -225,19 +254,26 @@ int main(int argc, char *argv[]) {
       // Capture the topic base by value so the lambdas don't depend on
       // cfg outliving them (which it does, but explicit is better).
       const std::string topicBase = cfg.mqtt.topic + "/meter/" + mcfg.name;
+      const std::string name = mcfg.name;
 
       master->setValueCallback(
-          [&mqtt, slavePtr, topicBase](std::string jsonDump,
-                                       MeterTypes::Values values) {
+          [&mqtt, &postgres, slavePtr, topicBase,
+           name](std::string jsonDump, MeterTypes::Values values) {
             mqtt->publish(std::move(jsonDump), topicBase + "/values");
+            // Copy to the postgres consumer (if enabled) before moving into the
+            // slave register map.
+            if (postgres)
+              postgres->onMeter(name, values);
             if (slavePtr)
               slavePtr->updateValues(std::move(values));
           });
 
       master->setDeviceCallback(
-          [&mqtt, slavePtr, topicBase](std::string jsonDump,
-                                       MeterTypes::Device device) {
+          [&mqtt, &postgres, slavePtr, topicBase,
+           name](std::string jsonDump, MeterTypes::Device device) {
             mqtt->publish(std::move(jsonDump), topicBase + "/device");
+            if (postgres)
+              postgres->onMeterDevice(name, device);
             if (slavePtr)
               slavePtr->updateDevice(std::move(device));
           });
@@ -259,10 +295,14 @@ int main(int argc, char *argv[]) {
                                                   buses.at(busKeyOf(icfg)));
 
       const std::string topicBase = cfg.mqtt.topic + "/inverter/" + icfg.name;
+      const std::string name = icfg.name;
 
       inv->setValueCallback(
-          [&mqtt, topicBase](std::string jsonDump, InverterTypes::Values) {
+          [&mqtt, &postgres, topicBase, name](std::string jsonDump,
+                                              InverterTypes::Values values) {
             mqtt->publish(std::move(jsonDump), topicBase + "/values");
+            if (postgres)
+              postgres->onInverter(name, std::move(values));
           });
 
       inv->setEventCallback(
@@ -271,8 +311,11 @@ int main(int argc, char *argv[]) {
           });
 
       inv->setDeviceCallback(
-          [&mqtt, topicBase](std::string jsonDump, InverterTypes::Device) {
+          [&mqtt, &postgres, topicBase, name](std::string jsonDump,
+                                              InverterTypes::Device device) {
             mqtt->publish(std::move(jsonDump), topicBase + "/device");
+            if (postgres)
+              postgres->onInverterDevice(name, std::move(device));
           });
 
       inv->setAvailabilityCallback(

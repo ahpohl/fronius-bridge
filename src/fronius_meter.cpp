@@ -1,8 +1,8 @@
 #include "fronius_meter.h"
 #include "config.h"
 #include "config_yaml.h"
-#include "json_utils.h"
 #include "meter_types.h"
+#include "utils.h"
 #include <chrono>
 #include <cmath>
 #include <expected>
@@ -356,32 +356,36 @@ std::expected<void, ModbusError> FroniusMeter::updateValuesAndJson() {
     return std::unexpected(err);
   }
 
+  // Quantise to the output precision; every consumer (MQTT JSON, Postgres, the
+  // debug log) then sees the same values.
+  values.round();
+
   // ---- Build JSON ----
   json newJson;
   json phases = json::array();
 
   phases.push_back({
       {"id", 1},
-      {"power_active", JsonUtils::roundTo(values.phase1.activePower, 0)},
-      {"power_apparent", JsonUtils::roundTo(values.phase1.apparentPower, 0)},
-      {"power_reactive", JsonUtils::roundTo(values.phase1.reactivePower, 0)},
-      {"power_factor", JsonUtils::roundTo(values.phase1.powerFactor, 1)},
-      {"voltage_ph", JsonUtils::roundTo(values.phase1.phVoltage, 1)},
-      {"voltage_pp", JsonUtils::roundTo(values.phase1.ppVoltage, 1)},
-      {"current", JsonUtils::roundTo(values.phase1.current, 3)},
+      {"power_active", values.phase1.activePower},
+      {"power_apparent", values.phase1.apparentPower},
+      {"power_reactive", values.phase1.reactivePower},
+      {"power_factor", values.phase1.powerFactor},
+      {"voltage_ph", values.phase1.phVoltage},
+      {"voltage_pp", values.phase1.ppVoltage},
+      {"current", values.phase1.current},
 
   });
 
   if (meter_->getPhases() > 1) {
     phases.push_back({
         {"id", 2},
-        {"power_active", JsonUtils::roundTo(values.phase2.activePower, 0)},
-        {"power_apparent", JsonUtils::roundTo(values.phase2.apparentPower, 0)},
-        {"power_reactive", JsonUtils::roundTo(values.phase2.reactivePower, 0)},
-        {"power_factor", JsonUtils::roundTo(values.phase2.powerFactor, 1)},
-        {"voltage_ph", JsonUtils::roundTo(values.phase2.phVoltage, 1)},
-        {"voltage_pp", JsonUtils::roundTo(values.phase2.ppVoltage, 1)},
-        {"current", JsonUtils::roundTo(values.phase2.current, 3)},
+        {"power_active", values.phase2.activePower},
+        {"power_apparent", values.phase2.apparentPower},
+        {"power_reactive", values.phase2.reactivePower},
+        {"power_factor", values.phase2.powerFactor},
+        {"voltage_ph", values.phase2.phVoltage},
+        {"voltage_pp", values.phase2.ppVoltage},
+        {"current", values.phase2.current},
 
     });
   }
@@ -389,37 +393,37 @@ std::expected<void, ModbusError> FroniusMeter::updateValuesAndJson() {
   if (meter_->getPhases() > 2) {
     phases.push_back({
         {"id", 3},
-        {"power_active", JsonUtils::roundTo(values.phase3.activePower, 0)},
-        {"power_apparent", JsonUtils::roundTo(values.phase3.apparentPower, 0)},
-        {"power_reactive", JsonUtils::roundTo(values.phase3.reactivePower, 0)},
-        {"power_factor", JsonUtils::roundTo(values.phase3.powerFactor, 1)},
-        {"voltage_ph", JsonUtils::roundTo(values.phase3.phVoltage, 1)},
-        {"voltage_pp", JsonUtils::roundTo(values.phase3.ppVoltage, 1)},
-        {"current", JsonUtils::roundTo(values.phase3.current, 3)},
+        {"power_active", values.phase3.activePower},
+        {"power_apparent", values.phase3.apparentPower},
+        {"power_reactive", values.phase3.reactivePower},
+        {"power_factor", values.phase3.powerFactor},
+        {"voltage_ph", values.phase3.phVoltage},
+        {"voltage_pp", values.phase3.ppVoltage},
+        {"current", values.phase3.current},
     });
   }
 
   newJson["time"] = values.time;
   newJson["energy_active_import"] =
-      JsonUtils::roundTo(values.activeEnergyImport * 1e-3, 3);
+      Utils::scaleToKilo(values.activeEnergyImport);
   newJson["energy_active_export"] =
-      JsonUtils::roundTo(values.activeEnergyExport * 1e-3, 3);
+      Utils::scaleToKilo(values.activeEnergyExport);
   newJson["energy_apparent_import"] =
-      JsonUtils::roundTo(values.apparentEnergyImport * 1e-3, 3);
+      Utils::scaleToKilo(values.apparentEnergyImport);
   newJson["energy_apparent_export"] =
-      JsonUtils::roundTo(values.apparentEnergyExport * 1e-3, 3);
+      Utils::scaleToKilo(values.apparentEnergyExport);
   newJson["energy_reactive_import"] =
-      JsonUtils::roundTo(values.reactiveEnergyImport * 1e-3, 3);
+      Utils::scaleToKilo(values.reactiveEnergyImport);
   newJson["energy_reactive_export"] =
-      JsonUtils::roundTo(values.reactiveEnergyExport * 1e-3, 3);
-  newJson["power_active"] = JsonUtils::roundTo(values.activePower, 0);
-  newJson["power_apparent"] = JsonUtils::roundTo(values.apparentPower, 0);
-  newJson["power_reactive"] = JsonUtils::roundTo(values.reactivePower, 0);
-  newJson["power_factor"] = JsonUtils::roundTo(values.powerFactor, 1);
-  newJson["frequency"] = JsonUtils::roundTo(values.frequency, 1);
-  newJson["voltage_ph"] = JsonUtils::roundTo(values.phVoltage, 1);
-  newJson["voltage_pp"] = JsonUtils::roundTo(values.ppVoltage, 1);
-  newJson["current"] = JsonUtils::roundTo(values.current, 3);
+      Utils::scaleToKilo(values.reactiveEnergyExport);
+  newJson["power_active"] = values.activePower;
+  newJson["power_apparent"] = values.apparentPower;
+  newJson["power_reactive"] = values.reactivePower;
+  newJson["power_factor"] = values.powerFactor;
+  newJson["frequency"] = values.frequency;
+  newJson["voltage_ph"] = values.phVoltage;
+  newJson["voltage_pp"] = values.ppVoltage;
+  newJson["current"] = values.current;
   newJson["phases"] = phases;
 
   {
@@ -439,7 +443,7 @@ std::expected<bool, ModbusError> FroniusMeter::updateDeviceAndJson() {
         EINTR, "updateDeviceAndJson(): Shutdown in progress"));
   }
 
-  if (deviceUpdated_.load())
+  if (deviceGate_.hasValue())
     return false;
 
   MeterTypes::Device newDevice;
@@ -482,14 +486,17 @@ std::expected<bool, ModbusError> FroniusMeter::updateDeviceAndJson() {
 
   logger_->debug("{}", newJson.dump());
 
+  // Record the identity as the baseline so the hasValue() guard short-circuits
+  // the Modbus re-read on subsequent polls; this is the first (and only) read,
+  // so the callback fires once.
+  deviceGate_.changed(newDevice);
+
   // ---- Commit values ----
   {
     std::lock_guard<std::mutex> lock(cbMutex_);
     jsonDevice_ = std::move(newJson);
     device_ = std::move(newDevice);
   }
-
-  deviceUpdated_.store(true);
 
   return true;
 }

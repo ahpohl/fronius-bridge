@@ -145,13 +145,28 @@ struct EasyMeterConfig {
   GridConfig grid;
 };
 
+// Where a meter sits in the installation, in Fronius terms. It determines what
+// the meter's energy means for the site-level calculations (a later feature):
+// a feed-in meter measures grid exchange (import and export), a consumption
+// meter measures a load. Meters with no location are monitored but left out of
+// the site energy balance.
+enum class MeterLocation { FeedIn, Consumption };
+
 // Kind-agnostic envelope. The optional `slave` block, if present, makes this
 // meter's live values available on a SunSpec Modbus endpoint (typically used
 // to feed a Fronius inverter for export limiting); it is independent of the
 // meter kind in `body`.
+//
+// `location` and `primary` describe the meter's role for the site energy
+// calculations. `location` is unset for meters that are only monitored;
+// `primary` marks the single main reference meter (Fronius "primary meter")
+// and requires a location, since the primary's location selects how the site
+// figures are computed.
 struct MeterConfig {
   std::string name;
   std::optional<MeterSlaveConfig> slave;
+  std::optional<MeterLocation> location;
+  bool primary{false};
   std::variant<FroniusMeterConfig, EasyMeterConfig> body;
 };
 
@@ -170,12 +185,53 @@ struct MqttConfig {
 };
 
 // ---------------------------------------------------------------------------
+// PostgreSQL config
+//
+// Optional consumer, peer to MQTT. Present only when the `postgres:` section
+// exists in the YAML; absent (std::nullopt on AppConfig) means the bridge
+// runs MQTT-only and never opens a database connection. Each named device
+// gets its own schema (named after the device); there is no central device
+// registry, so this block carries only connection-level settings.
+//
+// `dsn` is a standard libpq connection string. `queueSize` bounds the
+// in-memory FIFO of pending writes (drop-oldest on overflow, as for MQTT).
+// `autoMigrate` is not parsed from YAML: it defaults to true and is cleared
+// by the CLI `--no-migrate` flag to run schema verification only.
+// ---------------------------------------------------------------------------
+
+struct PostgresConfig {
+  std::string dsn;
+  std::size_t queueSize{10000};
+  ReconnectDelayConfig reconnectDelay;
+  bool autoMigrate{true}; // CLI-controlled (--no-migrate), not parsed
+};
+
+// ---------------------------------------------------------------------------
 // Logger config
 // ---------------------------------------------------------------------------
 
 struct LoggerConfig {
   spdlog::level::level_enum globalLevel{spdlog::level::info};
   std::map<std::string, spdlog::level::level_enum> moduleLevels;
+};
+
+// ---------------------------------------------------------------------------
+// Site config
+//
+// Optional installation location, written to the single-row public.site table
+// at startup. Only latitude is used for the daylight length; longitude (with
+// timezone) places sunrise/sunset. horizon_deg is the sun-centre altitude
+// counted as sunrise/sunset (-0.833 deg geometric default), a per-site
+// calibration for how far outside geometric daylight the inverter reports.
+// latitude/longitude are absent when the YAML has no `site:` section, in which
+// case no daylight figure is derived. Site-level, not per-device: one bridge
+// instance serves one site.
+// ---------------------------------------------------------------------------
+
+struct SiteConfig {
+  std::optional<double> latitude;
+  std::optional<double> longitude;
+  double horizon{-0.833}; // sun-centre altitude at sunrise/sunset, in degrees
 };
 
 // ---------------------------------------------------------------------------
@@ -206,9 +262,26 @@ struct BusInfo {
 std::optional<std::string> busKeyOf(const MeterConfig &m);
 std::string busKeyOf(const InverterConfig &i);
 
-// Human-readable transport descriptor for the startup summary, e.g.
-// "RTU 9600 8N1" or "TCP". Reconnect policy is deliberately omitted.
-std::string busTransportLabel(const ModbusBusConfig &cfg);
+// Complete startup summary line for one bus. For a shared RTU bus, e.g.
+// "'heatpump' (id 2), and 'primo' (id 1) with RTU transport (8N1, 9600 baud)
+// assigned to '/dev/ttyUSB0'"; for a point-to-point TCP endpoint, e.g.
+// "'primo' (id 1) with TCP transport connecting to '192.168.6.51:502'". Device
+// names are quoted and joined with an Oxford comma. Total over both transports,
+// so the caller need not pre-filter.
+std::string busSummaryLine(const std::string &key, const BusInfo &info);
+
+// A derived per-device descriptor: one device's identity and site-energy role,
+// synthesised by loadConfig() from the inverter and meter sections. The bridge
+// writes the set verbatim into public.device_registry at startup so the
+// site-level SQL can resolve each device's role by name. `location` is the
+// canonical string ('feed-in'/'consumption') or nullopt; the consumer binds it
+// straight into SQL, so the enum is mapped to text here rather than there.
+struct DeviceRegistryEntry {
+  std::string name;                    // device name == its schema name
+  std::string kind;                    // "inverter" | "meter"
+  std::optional<std::string> location; // "feed-in" | "consumption" | nullopt
+  bool primary{false};
+};
 
 // ---------------------------------------------------------------------------
 // Root config
@@ -218,13 +291,19 @@ struct AppConfig {
   std::vector<InverterConfig> inverters;
   std::vector<MeterConfig> meters;
   MqttConfig mqtt;
+  std::optional<PostgresConfig> postgres;
   LoggerConfig logger;
+  SiteConfig site;
 
   // Derived, not parsed: the deduplicated bus registry synthesised from
   // `inverters` and `meters` by loadConfig() (there is no [buses] YAML
   // section). Keyed by bus key (see busKeyOf). main builds one FroniusBus
   // per entry.
   std::map<std::string, BusInfo> buses;
+
+  // Derived, not parsed: one entry per configured device, in section order,
+  // handed to the PostgreSQL consumer to populate public.device_registry.
+  std::vector<DeviceRegistryEntry> deviceRegistry;
 };
 
 AppConfig loadConfig(const std::string &path);

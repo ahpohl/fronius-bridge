@@ -59,6 +59,21 @@ std::string supportedBaudList() {
   return list;
 }
 
+// Parse a positive count setting (e.g. a queue size) defaulting to `def`.
+// Parsed through a signed type so a negative value is rejected with a clear
+// error rather than wrapping to an enormous size_t: yaml-cpp's unsigned
+// conversion does not reject negatives, so reading straight into size_t would
+// let `queue_size: -1` slip past a `== 0` check. `field` names the setting
+// for the diagnostic.
+std::size_t parsePositiveSize(const YAML::Node &node, const char *field,
+                              long long def) {
+  const long long value = node.as<long long>(def);
+  if (value <= 0)
+    throw std::invalid_argument(
+        std::format("{} must be greater than zero", field));
+  return static_cast<std::size_t>(value);
+}
+
 } // namespace
 
 // Map a baud rate to its termios speed_t. The rate must already have been
@@ -421,6 +436,17 @@ static EasyMeterConfig parseEasyMeter(const YAML::Node &node) {
   return cfg;
 }
 
+// "feed-in" or "consumption"; nullopt for any other string (the caller turns
+// that into a fatal error). Absence of the key is handled by the caller, not
+// here, so that a present-but-misspelled value is rejected rather than ignored.
+static std::optional<MeterLocation> parseMeterLocation(const std::string &val) {
+  if (val == "feed-in")
+    return MeterLocation::FeedIn;
+  if (val == "consumption")
+    return MeterLocation::Consumption;
+  return std::nullopt;
+}
+
 static std::vector<MeterConfig> parseMeters(const YAML::Node &node) {
   std::vector<MeterConfig> result;
   if (!node)
@@ -443,6 +469,22 @@ static std::vector<MeterConfig> parseMeters(const YAML::Node &node) {
       } catch (const std::exception &e) {
         throw std::runtime_error(std::string(".slave") + e.what());
       }
+
+      // Role in the site energy model (both optional). `location` selects how
+      // this meter's energy is interpreted; `primary` marks the main reference
+      // meter and therefore requires a location.
+      if (const auto loc = node[i]["location"]) {
+        const auto s = loc.as<std::string>();
+        const auto parsed = parseMeterLocation(s);
+        if (!parsed)
+          throw std::runtime_error(".location: unknown value '" + s +
+                                   "' (expected 'feed-in' or 'consumption')");
+        cfg.location = *parsed;
+      }
+      cfg.primary = node[i]["primary"].as<bool>(false);
+      if (cfg.primary && !cfg.location)
+        throw std::runtime_error(
+            ".primary requires .location ('feed-in' or 'consumption')");
 
       // Kind-specific body, selected by the `type` field. "fronius" (the
       // default) is a SunSpec meter over Modbus; "ebz" is an EasyMeter
@@ -471,6 +513,15 @@ static std::vector<MeterConfig> parseMeters(const YAML::Node &node) {
       throw std::runtime_error(prefix + e.what());
     }
   }
+
+  // At most one primary meter: it is the single site-level reference, and its
+  // location selects how the site figures are computed. Zero is fine (the site
+  // energy feature is simply inactive); two or more is always a mistake.
+  if (std::count_if(result.begin(), result.end(),
+                    [](const MeterConfig &m) { return m.primary; }) > 1)
+    throw std::runtime_error(
+        "meters: at most one meter may be marked 'primary: true'");
+
   return result;
 }
 
@@ -482,7 +533,7 @@ static MqttConfig parseMqtt(const YAML::Node &node) {
   cfg.broker = node["broker"].as<std::string>("localhost");
   cfg.port = node["port"].as<int>(1883);
   cfg.topic = node["topic"].as<std::string>("fronius-bridge");
-  cfg.queueSize = node["queue_size"].as<size_t>(100);
+  cfg.queueSize = parsePositiveSize(node["queue_size"], "mqtt.queue_size", 100);
 
   if (node["user"])
     cfg.user = node["user"].as<std::string>();
@@ -493,8 +544,30 @@ static MqttConfig parseMqtt(const YAML::Node &node) {
 
   if (cfg.port <= 0 || cfg.port > 65535)
     throw std::invalid_argument("mqtt.port must be in range [1-65535]");
-  if (cfg.queueSize == 0)
-    throw std::invalid_argument("mqtt.queue_size must be greater than zero");
+
+  return cfg;
+}
+
+// The postgres section is optional: a missing section returns nullopt and the
+// bridge runs MQTT-only. When present, `dsn` is mandatory (there is no usable
+// default for a connection string); queue_size and reconnect_delay mirror the
+// mqtt semantics. autoMigrate is intentionally not read here — it is a runtime
+// flag set from the CLI, not config.
+static std::optional<PostgresConfig> parsePostgres(const YAML::Node &node) {
+  if (!node)
+    return std::nullopt;
+
+  PostgresConfig cfg;
+
+  const auto dsn = node["dsn"];
+  cfg.dsn = (dsn && !dsn.IsNull()) ? dsn.as<std::string>("") : "";
+  if (cfg.dsn.empty())
+    throw std::invalid_argument(
+        "postgres.dsn is required when the postgres section is present");
+
+  cfg.queueSize =
+      parsePositiveSize(node["queue_size"], "postgres.queue_size", 10000);
+  cfg.reconnectDelay = parseReconnectDelay(node["reconnect_delay"]);
 
   return cfg;
 }
@@ -536,6 +609,38 @@ static LoggerConfig parseLogger(const YAML::Node &node) {
         cfg.moduleLevels[key] = parseLogLevel(it.second.as<std::string>());
       }
     }
+  }
+
+  return cfg;
+}
+
+// Parse the optional `site:` section: the installation's latitude/longitude.
+// Both keys are optional and validated to real-world ranges when present; an
+// absent section leaves both unset (no daylight figure is derived). Only
+// latitude feeds the daylight calculation; longitude is stored for future use.
+static SiteConfig parseSite(const YAML::Node &node) {
+  SiteConfig cfg;
+  if (!node)
+    return cfg;
+
+  if (node["latitude"]) {
+    const double v = node["latitude"].as<double>();
+    if (v < -90.0 || v > 90.0)
+      throw std::invalid_argument("site.latitude must be in range [-90, 90]");
+    cfg.latitude = v;
+  }
+  if (node["longitude"]) {
+    const double v = node["longitude"].as<double>();
+    if (v < -180.0 || v > 180.0)
+      throw std::invalid_argument(
+          "site.longitude must be in range [-180, 180]");
+    cfg.longitude = v;
+  }
+  if (node["horizon"]) {
+    const double v = node["horizon"].as<double>();
+    if (v < -18.0 || v > 20.0)
+      throw std::invalid_argument("site.horizon must be in range [-18, 20]");
+    cfg.horizon = v;
   }
 
   return cfg;
@@ -601,14 +706,13 @@ template <typename Cfg> ModbusBusConfig makeBusConfig(const Cfg &cfg) {
                              "rtu)");
   }
 
-  // Enable the libmodbus wire trace only if the 'bus' logger is at trace
-  // level. The hex dump is the most verbose bus diagnostic, so it sits one
-  // level below the per-transaction 'bus' debug lines: `bus: debug` yields
-  // queue/tx/rx diagnostics, `bus: trace` additionally turns on the raw
-  // libmodbus wire dump. spdlog::get returns nullptr for an unconfigured
-  // logger, so the trace stays off unless the user opts in.
-  auto busLogger = spdlog::get("bus");
-  busCfg.debug = busLogger && (busLogger->level() == spdlog::level::trace);
+  // busCfg.debug (the libmodbus wire trace) is intentionally left at its
+  // default of false here. Whether to enable it depends on the 'bus' logger
+  // being at trace level, but deriveBuses() runs inside loadConfig() — before
+  // setupLogging() has registered any logger — so spdlog::get("bus") would
+  // always return nullptr at this point. The decision is therefore deferred to
+  // main(), which sets the flag per bus once the module loggers exist (see the
+  // bus-construction loop after setupLogging).
 
   busCfg.reconnectDelay = cfg.reconnectDelay.min;
   busCfg.reconnectDelayMax = cfg.reconnectDelay.max;
@@ -676,13 +780,23 @@ std::string busKeyOf(const InverterConfig &i) {
   return i.rtu ? busKeyRtu(*i.rtu) : busKeyTcp(*i.tcp);
 }
 
-std::string busTransportLabel(const ModbusBusConfig &cfg) {
-  if (cfg.isRtu()) {
-    const auto &r = cfg.rtu();
-    return std::to_string(r.dataBits) + r.parity + std::to_string(r.stopBits) +
-           ", " + std::to_string(r.baud) + " baud";
+std::string busSummaryLine(const std::string &key, const BusInfo &info) {
+  std::string members;
+  const auto &m = info.members;
+  for (std::size_t i = 0; i < m.size(); ++i) {
+    if (i > 0)
+      members += (i + 1 == m.size()) ? ", and " : ", ";
+    members += std::format("'{}' (id {})", m[i].name, m[i].slaveId);
   }
-  return "TCP";
+  if (info.config.isRtu()) {
+    const auto &r = info.config.rtu();
+    return std::format(
+        "{} with RTU transport ({}{}{}, {} baud) assigned to '{}'", members,
+        r.dataBits, r.parity, r.stopBits, r.baud, key);
+  }
+  // TCP is point-to-point, not a shared medium; the key is the host:port the
+  // device(s) connect to.
+  return std::format("{} with TCP transport connecting to '{}'", members, key);
 }
 
 // Synthesise the deduplicated bus registry from the inverter and meter
@@ -710,6 +824,33 @@ static std::map<std::string, BusInfo> deriveBuses(const AppConfig &cfg) {
     fold(busKeyOf(i), makeBusConfig(i), i.name, i.slaveId);
 
   return buses;
+}
+
+// Canonical registry string for a meter location, the inverse of
+// parseMeterLocation. Kept beside it so the two directions stay in sync.
+static std::string_view meterLocationName(MeterLocation loc) {
+  return loc == MeterLocation::FeedIn ? "feed-in" : "consumption";
+}
+
+// One registry entry per configured device, in section order: inverters first
+// (kind 'inverter', no location), then meters (kind 'meter', carrying their
+// location and primary role). The PostgreSQL consumer writes these into
+// public.device_registry at startup.
+static std::vector<DeviceRegistryEntry>
+deriveDeviceRegistry(const AppConfig &cfg) {
+  std::vector<DeviceRegistryEntry> registry;
+  registry.reserve(cfg.inverters.size() + cfg.meters.size());
+
+  for (const auto &i : cfg.inverters)
+    registry.push_back({i.name, "inverter", std::nullopt, false});
+  for (const auto &m : cfg.meters) {
+    std::optional<std::string> location;
+    if (m.location)
+      location = std::string{meterLocationName(*m.location)};
+    registry.push_back({m.name, "meter", std::move(location), m.primary});
+  }
+
+  return registry;
 }
 
 static void validateConfig(const AppConfig &cfg) {
@@ -938,12 +1079,17 @@ AppConfig loadConfig(const std::string &path) {
         "nothing to do");
 
   cfg.mqtt = parseMqtt(root["mqtt"]);
+  cfg.postgres = parsePostgres(root["postgres"]);
   cfg.logger = parseLogger(root["logger"]);
+  cfg.site = parseSite(root["site"]);
 
   validateConfig(cfg);
 
   // Derive the deduplicated bus registry from the validated device sections.
   cfg.buses = deriveBuses(cfg);
+
+  // Derive the device roster the PostgreSQL consumer writes to the registry.
+  cfg.deviceRegistry = deriveDeviceRegistry(cfg);
 
   return cfg;
 }

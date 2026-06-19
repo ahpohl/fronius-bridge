@@ -1,9 +1,9 @@
 #include "easy_meter.h"
 #include "config.h"
 #include "config_yaml.h"
-#include "json_utils.h"
 #include "meter_types.h"
 #include "signal_handler.h"
+#include "utils.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -332,7 +332,10 @@ std::expected<void, ModbusError> EasyMeter::updateValuesAndJson() {
 
       if (obis == "1-0:1.8.0*255") {
         size_t pos = value_unit.find("*");
-        activeEnergy = std::stod(value_unit.substr(0, pos));
+        // OBIS 1.8.0 reports active energy in kWh; scale to Wh so the Values
+        // struct holds Wh like every other source. All derived energy fields
+        // below inherit this unit, and each sink scales back via scaleToKilo.
+        activeEnergy = std::stod(value_unit.substr(0, pos)) * 1000.0;
       } else if (obis == "1-0:16.7.0*255") {
         size_t pos = value_unit.find("*");
         values.activePower = std::stod(value_unit.substr(0, pos));
@@ -453,62 +456,66 @@ std::expected<void, ModbusError> EasyMeter::updateValuesAndJson() {
   values.current =
       values.phase1.current + values.phase2.current + values.phase3.current;
 
+  // Quantise to the output precision; every consumer (MQTT JSON, Postgres, the
+  // debug log) then sees the same values.
+  values.round();
+
   json newJson;
   json phases = json::array();
 
   phases.push_back({
       {"id", 1},
-      {"power_active", JsonUtils::roundTo(values.phase1.activePower, 2)},
-      {"power_apparent", JsonUtils::roundTo(values.phase1.apparentPower, 2)},
-      {"power_reactive", JsonUtils::roundTo(values.phase1.reactivePower, 2)},
-      {"power_factor", JsonUtils::roundTo(values.phase1.powerFactor, 2)},
-      {"voltage_ph", JsonUtils::roundTo(values.phase1.phVoltage, 1)},
-      {"voltage_pp", JsonUtils::roundTo(values.phase1.ppVoltage, 1)},
-      {"current", JsonUtils::roundTo(values.phase1.current, 3)},
+      {"power_active", values.phase1.activePower},
+      {"power_apparent", values.phase1.apparentPower},
+      {"power_reactive", values.phase1.reactivePower},
+      {"power_factor", values.phase1.powerFactor},
+      {"voltage_ph", values.phase1.phVoltage},
+      {"voltage_pp", values.phase1.ppVoltage},
+      {"current", values.phase1.current},
   });
 
   phases.push_back({
       {"id", 2},
-      {"power_active", JsonUtils::roundTo(values.phase2.activePower, 2)},
-      {"power_apparent", JsonUtils::roundTo(values.phase2.apparentPower, 2)},
-      {"power_reactive", JsonUtils::roundTo(values.phase2.reactivePower, 2)},
-      {"power_factor", JsonUtils::roundTo(values.phase2.powerFactor, 2)},
-      {"voltage_ph", JsonUtils::roundTo(values.phase2.phVoltage, 1)},
-      {"voltage_pp", JsonUtils::roundTo(values.phase2.ppVoltage, 1)},
-      {"current", JsonUtils::roundTo(values.phase2.current, 3)},
+      {"power_active", values.phase2.activePower},
+      {"power_apparent", values.phase2.apparentPower},
+      {"power_reactive", values.phase2.reactivePower},
+      {"power_factor", values.phase2.powerFactor},
+      {"voltage_ph", values.phase2.phVoltage},
+      {"voltage_pp", values.phase2.ppVoltage},
+      {"current", values.phase2.current},
   });
 
   phases.push_back({
       {"id", 3},
-      {"power_active", JsonUtils::roundTo(values.phase3.activePower, 2)},
-      {"power_apparent", JsonUtils::roundTo(values.phase3.apparentPower, 2)},
-      {"power_reactive", JsonUtils::roundTo(values.phase3.reactivePower, 2)},
-      {"power_factor", JsonUtils::roundTo(values.phase3.powerFactor, 2)},
-      {"voltage_ph", JsonUtils::roundTo(values.phase3.phVoltage, 1)},
-      {"voltage_pp", JsonUtils::roundTo(values.phase3.ppVoltage, 1)},
-      {"current", JsonUtils::roundTo(values.phase3.current, 3)},
+      {"power_active", values.phase3.activePower},
+      {"power_apparent", values.phase3.apparentPower},
+      {"power_reactive", values.phase3.reactivePower},
+      {"power_factor", values.phase3.powerFactor},
+      {"voltage_ph", values.phase3.phVoltage},
+      {"voltage_pp", values.phase3.ppVoltage},
+      {"current", values.phase3.current},
   });
 
   newJson["time"] = values.time;
   newJson["energy_active_import"] =
-      JsonUtils::roundTo(values.activeEnergyImport, 3);
+      Utils::scaleToKilo(values.activeEnergyImport);
   newJson["energy_active_export"] =
-      JsonUtils::roundTo(values.activeEnergyExport, 3);
+      Utils::scaleToKilo(values.activeEnergyExport);
   newJson["energy_apparent_import"] =
-      JsonUtils::roundTo(values.apparentEnergyImport, 3);
+      Utils::scaleToKilo(values.apparentEnergyImport);
   newJson["energy_apparent_export"] =
-      JsonUtils::roundTo(values.apparentEnergyExport, 3);
+      Utils::scaleToKilo(values.apparentEnergyExport);
   newJson["energy_reactive_import"] =
-      JsonUtils::roundTo(values.reactiveEnergyImport, 3);
+      Utils::scaleToKilo(values.reactiveEnergyImport);
   newJson["energy_reactive_export"] =
-      JsonUtils::roundTo(values.reactiveEnergyExport, 3);
-  newJson["power_active"] = JsonUtils::roundTo(values.activePower, 2);
-  newJson["power_apparent"] = JsonUtils::roundTo(values.apparentPower, 2);
-  newJson["power_reactive"] = JsonUtils::roundTo(values.reactivePower, 2);
-  newJson["power_factor"] = JsonUtils::roundTo(values.powerFactor, 2);
-  newJson["frequency"] = JsonUtils::roundTo(values.frequency, 2);
-  newJson["voltage_ph"] = JsonUtils::roundTo(values.phVoltage, 1);
-  newJson["voltage_pp"] = JsonUtils::roundTo(values.ppVoltage, 1);
+      Utils::scaleToKilo(values.reactiveEnergyExport);
+  newJson["power_active"] = values.activePower;
+  newJson["power_apparent"] = values.apparentPower;
+  newJson["power_reactive"] = values.reactivePower;
+  newJson["power_factor"] = values.powerFactor;
+  newJson["frequency"] = values.frequency;
+  newJson["voltage_ph"] = values.phVoltage;
+  newJson["voltage_pp"] = values.ppVoltage;
   newJson["phases"] = phases;
 
   // Update shared values and JSON with lock
@@ -636,7 +643,10 @@ void EasyMeter::runLoop() {
 
     if (handler_.isRunning()) {
       std::lock_guard<std::mutex> lock(cbMutex_);
-      if (deviceCallback_) {
+      // Emit only when the identity changed since the last emission; the EBZ
+      // re-parses it from every telegram, so without this it would republish
+      // once per poll.
+      if (deviceCallback_ && deviceGate_.changed(device_)) {
         deviceCallback_(jsonDevice_.dump(), device_);
       }
     }

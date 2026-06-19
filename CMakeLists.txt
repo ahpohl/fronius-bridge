@@ -65,6 +65,7 @@ find_package(CLI11 REQUIRED)
 find_package(PkgConfig REQUIRED)
 option(FRONIUS_STATIC "Link libfronius statically" OFF)
 pkg_check_modules(MOSQUITTO REQUIRED IMPORTED_TARGET libmosquitto)
+pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET libpq)
 
 if(FRONIUS_STATIC)
     # pkg-config gives us the library name and search paths; we resolve the
@@ -102,6 +103,10 @@ set(SRC_FILES
     src/fronius_meter.cpp
     src/easy_meter.cpp
     src/meter_slave.cpp
+    src/schema_migrator.cpp
+    src/migrations.cpp
+    src/postgres_client.cpp
+    src/pg.cpp
 )
 
 # --- Executable ---
@@ -111,6 +116,15 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}    # for generated config.h
     ${PROJECT_SOURCE_DIR}/include  # project's public headers
 )
+
+# --- #embed search path ---
+# migrations.cpp uses #embed to fold the per-kind SQL migration files into the
+# binary. Setting --embed-dir lets the directives use stable paths rooted at
+# the project source dir (e.g. "db/inverter/001_initial.sql") rather than
+# path-walking from the source file's location.
+target_compile_options(${PROJECT_NAME} PRIVATE
+    --embed-dir=${PROJECT_SOURCE_DIR}
+)
  
 target_link_libraries(${PROJECT_NAME} PRIVATE
     yaml-cpp::yaml-cpp
@@ -118,12 +132,22 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     nlohmann_json::nlohmann_json
     CLI11::CLI11
     PkgConfig::MOSQUITTO
+    PkgConfig::LIBPQ
     $<IF:$<BOOL:${FRONIUS_STATIC}>,fronius_static,PkgConfig::FRONIUS>
 )
 
 # --- Install (so CPack has something to package) ---
 install(TARGETS ${PROJECT_NAME}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# Install schema migrations for diagnostic / manual-recovery use. Not required
+# at runtime - migrations are embedded in the binary - but useful for operators
+# who want to inspect or apply them via psql directly. The db/<kind>/ structure
+# is preserved.
+install(DIRECTORY db/
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/${PROJECT_NAME}/db
+  FILES_MATCHING PATTERN "*.sql"
 )
 
 # --- CPack (components) ---

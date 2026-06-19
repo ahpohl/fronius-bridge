@@ -1,0 +1,86 @@
+<svg width="680" height="520" viewBox="0 0 680 520" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Grid meter placement</title>
+  <desc>The two supported placements for the primary meter. At the feed-in point (Regime A) the meter sits at the grid connection and measures import and export directly, so self-consumption is exact. In the consumption branch (Regime B) the meter sits past the PV junction and sees only house load, so self-consumption is estimated from 30-second power overlap.</desc>
+
+  <defs>
+    <marker id="mp-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="mp-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#185FA5" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="mp-teal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#0F6E56" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- ===================================================== -->
+  <!-- Panel A: feed-in point (Regime A, measured)           -->
+  <!-- ===================================================== -->
+  <text x="24" y="28" font-family="sans-serif" font-size="14" font-weight="600" fill="#2C2C2A">Feed-in point &#8212; Regime A (measured)</text>
+  <text x="24" y="48" font-family="sans-serif" font-size="11" fill="#888780">Primary meter at the grid connection: it sees the net flow, so import and export are measured directly.</text>
+
+  <!-- grid -->
+  <rect x="24" y="106" width="92" height="48" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text x="70" y="130" text-anchor="middle" dominant-baseline="central" font-family="sans-serif" font-size="13" font-weight="500" fill="#2C2C2A">Grid</text>
+
+  <!-- primary meter (highlighted) -->
+  <rect x="146" y="102" width="140" height="56" rx="8" fill="#FAECE7" stroke="#993C1D" stroke-width="1"/>
+  <text x="216" y="123" text-anchor="middle" dominant-baseline="central" font-family="sans-serif" font-size="13" font-weight="600" fill="#4A1B0C">Primary meter</text>
+  <text x="216" y="141" text-anchor="middle" dominant-baseline="central" font-family="sans-serif" font-size="11" fill="#993C1D">location: feed-in</text>
+
+  <!-- PV junction node -->
+  <text x="372" y="112" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#888780">PV junction</text>
+  <circle cx="372" cy="130" r="5" fill="#5F5E5A"/>
+
+  <!-- loads -->
+  <rect x="576" y="106" width="88" height="48" rx="8" fill="#FAEEDA" stroke="#BA7517" stroke-width="0.5"/>
+  <text x="620" y="130" text-anchor="middle" dominant-baseline="central" font-family="sans-serif" font-size="13" font-weight="500" fill="#633806">Loads</text>
+
+  <!-- inverter -->
+  <rect x="312" y="196" width="120" height="48" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+  <text x="372" y="220" text-anchor="middle" dominant-baseline="central" font-family="sans-serif" font-size="13" font-weight="500" fill="#085041">Inverter (PV)</text>
+
+  <!-- links: grid <-> meter (bidirectional, measured), meter -> junction -> loads, PV -> junction -->
+  <line x1="116" y1="130" x2="146" y2="130" stroke="#185FA5" stroke-width="1.2" marker-start="url(#mp-blue)" marker-end="url(#mp-blue)"/>
+  <line x1="286" y1="130" x2="366" y2="130" stroke="#5F5E5A" stroke-width="1"/>
+  <line x1="378" y1="130" x2="576" y2="130" stroke="#5F5E5A" stroke-width="1" marker-end="url(#mp-gray)"/>
+  <line x1="372" y1="196" x2="372" y2="138" stroke="#0F6E56" stroke-width="1" marker-end="url(#mp-teal)"/>
+
+  <!-- panel divider -->
+  <line x1="24" y1="262" x2="656" y2="262" stroke="#E4E2DA" stroke-width="1"/>
+
+  <!-- ===================================================== -->
+  <!-- Panel B: consumption path (Regime B, simulated)       -->
+  <!-- ===================================================== -->
+  <text x="24" y="300" font-family="sans-serif" font-size="14" font-weight="600" fill="#2C2C2A">Consumption path &#8212; Regime B (simulated)</text>
+  <text x="24" y="320" font-family="sans-serif" font-size="11" fill="#888780">Past the PV junction the meter sees only house load, so self-consumption is simulated from power overlap.</text>
+
+  <!-- grid -->
+  <rect x="24" y="378" width="92" height="48" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text x="70" y="402" text-anchor="middle" dominant-baseline="central" font-family="sans-serif" font-size="13" font-weight="500" fill="#2C2C2A">Grid</text>
+
+  <!-- PV junction node -->
+  <text x="372" y="360" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#888780">PV junction</text>
+  <circle cx="372" cy="402" r="5" fill="#5F5E5A"/>
+
+  <!-- primary meter (highlighted), now on the load branch -->
+  <rect x="408" y="374" width="140" height="56" rx="8" fill="#FAECE7" stroke="#993C1D" stroke-width="1"/>
+  <text x="478" y="395" text-anchor="middle" dominant-baseline="central" font-family="sans-serif" font-size="13" font-weight="600" fill="#4A1B0C">Primary meter</text>
+  <text x="478" y="413" text-anchor="middle" dominant-baseline="central" font-family="sans-serif" font-size="11" fill="#993C1D">location: consumption</text>
+
+  <!-- loads -->
+  <rect x="576" y="378" width="88" height="48" rx="8" fill="#FAEEDA" stroke="#BA7517" stroke-width="0.5"/>
+  <text x="620" y="402" text-anchor="middle" dominant-baseline="central" font-family="sans-serif" font-size="13" font-weight="500" fill="#633806">Loads</text>
+
+  <!-- inverter -->
+  <rect x="312" y="468" width="120" height="48" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+  <text x="372" y="492" text-anchor="middle" dominant-baseline="central" font-family="sans-serif" font-size="13" font-weight="500" fill="#085041">Inverter (PV)</text>
+
+  <!-- links: grid <-> junction (bidirectional), junction -> meter -> loads, PV -> junction -->
+  <line x1="116" y1="402" x2="366" y2="402" stroke="#185FA5" stroke-width="1.2" marker-start="url(#mp-blue)" marker-end="url(#mp-blue)"/>
+  <line x1="378" y1="402" x2="408" y2="402" stroke="#5F5E5A" stroke-width="1"/>
+  <line x1="548" y1="402" x2="576" y2="402" stroke="#5F5E5A" stroke-width="1" marker-end="url(#mp-gray)"/>
+  <line x1="372" y1="468" x2="372" y2="410" stroke="#0F6E56" stroke-width="1" marker-end="url(#mp-teal)"/>
+
+</svg>

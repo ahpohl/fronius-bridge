@@ -1,6 +1,7 @@
 #ifndef INVERTER_MASTER_H_
 #define INVERTER_MASTER_H_
 
+#include "change_gate.h"
 #include "config_yaml.h"
 #include "inverter_types.h"
 #include "signal_handler.h"
@@ -38,10 +39,10 @@ public:
 
   std::expected<void, ModbusError> updateValuesAndJson(void);
   std::expected<void, ModbusError> updateEventsAndJson(void);
-  // Returns true if the device info was (re)read from the wire on this
-  // call, false if it was already cached from a previous call and nothing
-  // changed. Used by runLoop to skip publishing the (unchanged) device
-  // JSON to MQTT on every poll cycle.
+  // Returns true if the device identity was read on this call and differs
+  // from what was last emitted (so runLoop should publish it), false if the
+  // identity was already read and is unchanged. The inverter is read over
+  // Modbus, so identity is read once and skipped thereafter.
   std::expected<bool, ModbusError> updateDeviceAndJson(void);
 
   void
@@ -87,7 +88,11 @@ private:
   std::thread worker_;
   std::atomic<bool> connected_{false};
   std::condition_variable cv_;
-  std::atomic<bool> deviceUpdated_{false};
+
+  // Emits the device callback only when the identity actually changes. The
+  // inverter is read over Modbus, so identity is read once (hasValue() guards
+  // the re-read) and the gate records that single value.
+  ChangeGate<InverterTypes::Device> deviceGate_;
 };
 
 #endif /* INVERTER_MASTER_H_ */

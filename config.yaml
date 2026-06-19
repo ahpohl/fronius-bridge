@@ -6,44 +6,26 @@
 # ----------------
 # 1. Fronius Primo 4.0 inverter
 # 2. Primary grid EBZ Easymeter
-# 3. Secondary Fronius TS 65a-3 meter only for heat pump
+# 3. Secondary Fronius TS 65A-3 meter only for heat pump
+
+site:
+  # New York city timesquare
+  latitude: 40.7589
+  longitude: -73.9851
+  horizon: -0.833
 
 inverters:
   - name: primo
-    tcp:
-      host: primo.home.arpa
-      port: 502
+    rtu:
+      device: /dev/ttyUSB0
     unit_id: 1
     response_timeout: { sec: 5, usec: 0 }
     update_interval: 4
     reconnect_delay: { min: 5, max: 320, exponential: true }
 
 meters:
-  # Primary grid meter: EBZ Easymeter read over a USB-IR head on its own
-  # serial line. `type: ebz` selects the Easymeter reader; it is not a Modbus
-  # device, so it takes only `rtu` (which it owns exclusively — the line
-  # cannot be shared) and an optional `grid` block. It has no unit_id,
-  # update_interval, response_timeout, or reconnect_delay (those keys are
-  # rejected here); it publishes as telegrams arrive.
-  - name: grid
-    type: ebz
-    rtu:
-      device: /dev/ttyUSB1
-      baud: 9600
-      data_bits: 7
-      stop_bits: 1
-      parity: even
-    # The EBZ reports only active power/energy; reactive and apparent
-    # quantities and per-phase currents are derived from these assumptions.
-    grid:
-      power_factor: 0.95
-      frequency: 50.0
-      leading: false
-
-  # Secondary Fronius TS 65a-3 meter for the heat pump (default type:
-  # fronius). Modbus RTU master on its own bus, re-exposed as a SunSpec TCP
-  # slave so the inverter can read it.
   - name: heatpump
+    location: consumption
     rtu:
       device: /dev/ttyUSB0
       baud: 9600
@@ -61,28 +43,49 @@ meters:
       unit_id: 1
       use_float_model: false
 
+  - name: grid
+    type: ebz
+    location: consumption
+    primary: true
+    rtu:
+      device: /dev/ttyUSB1
+      baud: 9600
+      data_bits: 7
+      stop_bits: 1
+      parity: even
+    grid:
+      power_factor: 0.98
+      leading: false    # false = inductive (lagging), true = capacitive (leading)
+      frequency: 50.00
+    slave:
+      tcp:
+        listen: 0.0.0.0
+        port: 502
+      unit_id: 1
+      use_float_model: false
+
 mqtt:
   broker: localhost
   port: 1883
   topic: fronius-bridge
   #user: mqtt
-  #password: "your very secure password"
+  #password: "your-secure-password"
   queue_size: 100
+  reconnect_delay: { min: 2, max: 64, exponential: true }
+
+postgres:
+  dsn: "host=localhost port=5432 dbname=fronius user=fronius_bridge password=your-secure-password"
+  queue_size: 10000
   reconnect_delay: { min: 2, max: 64, exponential: true }
 
 logger:
   level: info
   modules:
     main: info
-    # Shared Modbus bus diagnostics. `debug` adds per-transaction queue/tx/rx
-    # lines; `trace` additionally enables the raw libmodbus wire (hex) dump.
     bus: info
     mqtt: info
-    # Device loggers are fixed class-based modules, not per-device names.
-    # `meter` covers both roles below; set `meter.master` / `meter.slave`
-    # to override one independently. Lookup falls back meter.master ->
-    # meter -> default and meter.slave -> meter -> default.
-    meter: info
-    #meter.master: debug
-    #meter.slave: info
+    postgres: info
     inverter: info
+    meter:
+      master: info
+      slave: info

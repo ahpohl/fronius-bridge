@@ -1,7 +1,7 @@
 #include "inverter_master.h"
 #include "config_yaml.h"
 #include "inverter_types.h"
-#include "json_utils.h"
+#include "utils.h"
 #include <chrono>
 #include <expected>
 #include <fronius/fronius_bus.h>
@@ -267,7 +267,7 @@ std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
 
   try {
     // AC values
-    values.acEnergy = ModbusError::getOrThrow(inverter_->getAcEnergy()) * 1e-3;
+    values.acEnergy = ModbusError::getOrThrow(inverter_->getAcEnergy());
     values.acPowerActive = ModbusError::getOrThrow(
         inverter_->getAcPower(FroniusTypes::Output::ACTIVE));
     values.acPowerApparent = ModbusError::getOrThrow(
@@ -311,9 +311,8 @@ std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
     values.input1.dcCurrent = ModbusError::getOrThrow(
         inverter_->getDcCurrent(FroniusTypes::Input::A));
     if (!inverter_->isHybrid())
-      values.input1.dcEnergy = ModbusError::getOrThrow(inverter_->getDcEnergy(
-                                   FroniusTypes::Input::A)) *
-                               1e-3;
+      values.input1.dcEnergy = ModbusError::getOrThrow(
+          inverter_->getDcEnergy(FroniusTypes::Input::A));
 
     if (inverter_->getInputs() == 2) {
       values.input2.dcPower = ModbusError::getOrThrow(
@@ -323,9 +322,8 @@ std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
       values.input2.dcCurrent = ModbusError::getOrThrow(
           inverter_->getDcCurrent(FroniusTypes::Input::B));
       if (!inverter_->isHybrid())
-        values.input2.dcEnergy = ModbusError::getOrThrow(inverter_->getDcEnergy(
-                                     FroniusTypes::Input::B)) *
-                                 1e-3;
+        values.input2.dcEnergy = ModbusError::getOrThrow(
+            inverter_->getDcEnergy(FroniusTypes::Input::B));
     }
 
   } catch (const ModbusError &err) {
@@ -339,17 +337,21 @@ std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
     values.efficiency = 0.0;
   }
 
+  // Quantise to the output precision; every consumer (MQTT JSON, Postgres, the
+  // debug log) then sees the same values.
+  values.round();
+
   // ---- Build JSON ----
   json newJson;
 
   newJson["time"] = values.time;
-  newJson["ac_energy"] = JsonUtils::roundTo(values.acEnergy, 1);
+  newJson["ac_energy"] = Utils::scaleToKilo(values.acEnergy);
 
   // AC power metrics
-  newJson["ac_power_active"] = JsonUtils::roundTo(values.acPowerActive, 1);
-  newJson["ac_power_apparent"] = JsonUtils::roundTo(values.acPowerApparent, 1);
-  newJson["ac_power_reactive"] = JsonUtils::roundTo(values.acPowerReactive, 1);
-  newJson["ac_power_factor"] = JsonUtils::roundTo(values.acPowerFactor, 1);
+  newJson["ac_power_active"] = values.acPowerActive;
+  newJson["ac_power_apparent"] = values.acPowerApparent;
+  newJson["ac_power_reactive"] = values.acPowerReactive;
+  newJson["ac_power_factor"] = values.acPowerFactor;
 
   // ---- Phases ----
   json phases = json::array();
@@ -362,15 +364,15 @@ std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
   for (int i = 0; i < phaseCount; ++i) {
     phases.push_back({
         {"id", i + 1},
-        {"ac_voltage", JsonUtils::roundTo(phaseList[i]->acVoltage, 2)},
-        {"ac_current", JsonUtils::roundTo(phaseList[i]->acCurrent, 3)},
+        {"ac_voltage", phaseList[i]->acVoltage},
+        {"ac_current", phaseList[i]->acCurrent},
     });
   }
 
   newJson["phases"] = std::move(phases);
-  newJson["ac_frequency"] = JsonUtils::roundTo(values.acFrequency, 2);
-  newJson["dc_power"] = JsonUtils::roundTo(values.dcPower, 1);
-  newJson["efficiency"] = JsonUtils::roundTo(values.efficiency, 1);
+  newJson["ac_frequency"] = values.acFrequency;
+  newJson["dc_power"] = values.dcPower;
+  newJson["efficiency"] = values.efficiency;
 
   // ---- DC Inputs ----
   json inputs = json::array();
@@ -383,13 +385,13 @@ std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
   for (int i = 0; i < inputCount; ++i) {
     json input = {
         {"id", i + 1},
-        {"dc_voltage", JsonUtils::roundTo(inputList[i]->dcVoltage, 2)},
-        {"dc_current", JsonUtils::roundTo(inputList[i]->dcCurrent, 3)},
-        {"dc_power", JsonUtils::roundTo(inputList[i]->dcPower, 1)},
+        {"dc_voltage", inputList[i]->dcVoltage},
+        {"dc_current", inputList[i]->dcCurrent},
+        {"dc_power", inputList[i]->dcPower},
     };
 
     if (!inverter_->isHybrid()) {
-      input["dc_energy"] = JsonUtils::roundTo(inputList[i]->dcEnergy, 1);
+      input["dc_energy"] = Utils::scaleToKilo(inputList[i]->dcEnergy);
     }
 
     inputs.push_back(std::move(input));
@@ -470,7 +472,7 @@ std::expected<bool, ModbusError> InverterMaster::updateDeviceAndJson() {
         EINTR, "updateDeviceAndJson(): Shutdown in progress"));
   }
 
-  if (deviceUpdated_.load())
+  if (deviceGate_.hasValue())
     return false;
 
   InverterTypes::Device newDevice;
@@ -524,14 +526,17 @@ std::expected<bool, ModbusError> InverterMaster::updateDeviceAndJson() {
 
   logger_->debug("{}", newJson.dump());
 
+  // Record the identity as the baseline so the hasValue() guard short-circuits
+  // the Modbus re-read on subsequent polls; this is the first (and only) read,
+  // so the callback fires once.
+  deviceGate_.changed(newDevice);
+
   // ---- Commit values ----
   {
     std::lock_guard<std::mutex> lock(cbMutex_);
     jsonDevice_ = std::move(newJson);
     device_ = std::move(newDevice);
   }
-
-  deviceUpdated_.store(true);
 
   return true;
 }

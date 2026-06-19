@@ -1,6 +1,7 @@
 #ifndef FRONIUS_METER_H_
 #define FRONIUS_METER_H_
 
+#include "change_gate.h"
 #include "config_yaml.h"
 #include "meter_master.h"
 #include "meter_types.h"
@@ -35,10 +36,10 @@ public:
   MeterTypes::Values getValues(void) const;
 
   std::expected<void, ModbusError> updateValuesAndJson(void);
-  // Returns true if the device info was (re)read from the wire on this
-  // call, false if it was already cached from a previous call and nothing
-  // changed. Used by runLoop to skip publishing the (unchanged) device
-  // JSON to MQTT on every poll cycle.
+  // Returns true if the device identity was read on this call and differs
+  // from what was last emitted (so runLoop should publish it), false if the
+  // identity was already read and is unchanged. The meter is read over Modbus,
+  // so identity is read once and skipped thereafter.
   std::expected<bool, ModbusError> updateDeviceAndJson(void);
 
 private:
@@ -75,7 +76,11 @@ private:
   std::thread worker_;
   std::atomic<bool> connected_{false};
   std::condition_variable cv_;
-  std::atomic<bool> deviceUpdated_{false};
+
+  // Emits the device callback only when the identity actually changes. The
+  // meter is read over Modbus, so identity is read once (hasValue() guards the
+  // re-read) and the gate records that single value.
+  ChangeGate<MeterTypes::Device> deviceGate_;
 };
 
 #endif /* FRONIUS_METER_H_ */
