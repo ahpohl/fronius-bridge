@@ -4,6 +4,7 @@
 #include "utils.h"
 #include <chrono>
 #include <expected>
+#include <format>
 #include <fronius/fronius_bus.h>
 #include <fronius/fronius_types.h>
 #include <fronius/inverter.h>
@@ -51,7 +52,8 @@ InverterMaster::InverterMaster(const InverterConfig &cfg,
       bus_->addBusErrorCallback([this](const ModbusError &err) {
         if (err.severity == ModbusError::Severity::FATAL) {
           logger_->error("FATAL Modbus bus error: {}", err.describe());
-          handler_.shutdown();
+          handler_.shutdown(
+              true, std::format("inverter '{}' Modbus bus error", cfg_.name));
         } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
           logger_->trace("Modbus bus operation cancelled due to shutdown: {}",
                          err.describe());
@@ -79,7 +81,8 @@ InverterMaster::InverterMaster(const InverterConfig &cfg,
   inverter_->setDeviceErrorCallback([this](const ModbusError &err) {
     if (err.severity == ModbusError::Severity::FATAL) {
       logger_->error("FATAL Modbus error: {}", err.describe());
-      handler_.shutdown();
+      handler_.shutdown(true,
+                        std::format("inverter '{}' Modbus error", cfg_.name));
 
     } else if (err.severity == ModbusError::Severity::TRANSIENT) {
       logger_->debug("Transient Modbus error: {}", err.describe());

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstring>
 #include <expected>
+#include <format>
 #include <fronius/common_registers.h>
 #include <fronius/meter_registers.h>
 #include <fronius/modbus_error.h>
@@ -148,7 +149,8 @@ MeterSlave::handleResult(std::expected<void, ModbusError> &&result) {
 
   if (err.severity == ModbusError::Severity::FATAL) {
     logger_->error("FATAL Modbus error: {}", err.describe());
-    handler_.shutdown();
+    handler_.shutdown(true,
+                      std::format("meter slave '{}' Modbus error", name_));
     return MeterTypes::ErrorAction::SHUTDOWN;
 
   } else if (err.severity == ModbusError::Severity::TRANSIENT) {

@@ -525,6 +525,44 @@ static std::vector<MeterConfig> parseMeters(const YAML::Node &node) {
   return result;
 }
 
+// The mqtt.tls section is optional: a missing section returns nullopt and the
+// broker connection stays plaintext. When present, an empty block ({}) is
+// valid and selects TLS with the OS trust store. A client certificate needs
+// both cert_file and key_file, plus a CA source (ca_file or ca_path), because
+// libmosquitto's mosquitto_tls_set() requires cafile or capath whenever a
+// client certificate is supplied.
+static std::optional<MqttTlsConfig> parseMqttTls(const YAML::Node &node) {
+  if (!node)
+    return std::nullopt;
+
+  MqttTlsConfig cfg;
+
+  if (node["ca_file"])
+    cfg.caFile = node["ca_file"].as<std::string>();
+  if (node["ca_path"])
+    cfg.caPath = node["ca_path"].as<std::string>();
+  if (node["cert_file"])
+    cfg.certFile = node["cert_file"].as<std::string>();
+  if (node["key_file"])
+    cfg.keyFile = node["key_file"].as<std::string>();
+  if (node["tls_version"])
+    cfg.tlsVersion = node["tls_version"].as<std::string>();
+  if (node["ciphers"])
+    cfg.ciphers = node["ciphers"].as<std::string>();
+  cfg.insecure = node["insecure"].as<bool>(false);
+
+  if (cfg.certFile.has_value() != cfg.keyFile.has_value())
+    throw std::invalid_argument(
+        "mqtt.tls: cert_file and key_file must be set together");
+
+  if (cfg.certFile.has_value() && !cfg.caFile.has_value() &&
+      !cfg.caPath.has_value())
+    throw std::invalid_argument(
+        "mqtt.tls: a client certificate requires ca_file or ca_path");
+
+  return cfg;
+}
+
 static MqttConfig parseMqtt(const YAML::Node &node) {
   if (!node)
     throw std::runtime_error("Missing mqtt section in config");
@@ -541,6 +579,7 @@ static MqttConfig parseMqtt(const YAML::Node &node) {
     cfg.password = node["password"].as<std::string>();
 
   cfg.reconnectDelay = parseReconnectDelay(node["reconnect_delay"]);
+  cfg.tls = parseMqttTls(node["tls"]);
 
   if (cfg.port <= 0 || cfg.port > 65535)
     throw std::invalid_argument("mqtt.port must be in range [1-65535]");

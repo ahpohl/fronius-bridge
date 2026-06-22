@@ -171,6 +171,30 @@ struct MeterConfig {
 };
 
 // ---------------------------------------------------------------------------
+// MQTT TLS config
+//
+// Optional sub-block of the MQTT section. Present means the broker connection
+// is secured with TLS; absent means a plaintext connection. The broker
+// certificate is verified against `caFile`/`caPath` when either is given, or
+// against the OS trust store otherwise (so a broker using a public CA such as
+// Let's Encrypt needs no local certificate). `certFile`/`keyFile` add a client
+// certificate for mutual TLS and require a CA source, since libmosquitto's
+// mosquitto_tls_set() needs cafile or capath whenever a client certificate is
+// supplied. `insecure` disables broker hostname/certificate verification and
+// is intended for testing against self-signed certificates only.
+// ---------------------------------------------------------------------------
+
+struct MqttTlsConfig {
+  std::optional<std::string> caFile;     // PEM CA bundle that signed the broker
+  std::optional<std::string> caPath;     // directory of PEM CA certificates
+  std::optional<std::string> certFile;   // client certificate (mutual TLS)
+  std::optional<std::string> keyFile;    // client private key (mutual TLS)
+  std::optional<std::string> tlsVersion; // e.g. "tlsv1.2", "tlsv1.3"
+  std::optional<std::string> ciphers;    // OpenSSL cipher list
+  bool insecure{false};                  // skip broker verification (testing)
+};
+
+// ---------------------------------------------------------------------------
 // MQTT config
 // ---------------------------------------------------------------------------
 
@@ -182,6 +206,7 @@ struct MqttConfig {
   std::optional<std::string> password;
   size_t queueSize{100};
   ReconnectDelayConfig reconnectDelay;
+  std::optional<MqttTlsConfig> tls;
 };
 
 // ---------------------------------------------------------------------------

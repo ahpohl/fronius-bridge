@@ -185,9 +185,9 @@ void PostgresClient::run() {
         // Configuration / schema / privilege / missing-extension error:
         // retrying produces the same failure forever. Escalate to shutdown so
         // the operator gets a non-zero exit and a chance to fix the cause.
-        postgresLogger_->error("Postgres setup failed: {} - shutting down",
+        postgresLogger_->error("Postgres setup failed: {}",
                                err.describe());
-        handler_.shutdown();
+        handler_.shutdown(true, "Postgres setup failed");
         break;
       }
       postgresLogger_->warn("Postgres setup failed: {} - retrying in {}s",
@@ -218,9 +218,9 @@ void PostgresClient::run() {
         const auto &err = result.error();
 
         if (err.severity == DbError::Severity::FATAL) {
-          postgresLogger_->error("Postgres event failed: {} - shutting down",
+          postgresLogger_->error("Postgres event failed: {}",
                                  err.describe());
-          handler_.shutdown();
+          handler_.shutdown(true, "Postgres write failed");
           break;
         }
 

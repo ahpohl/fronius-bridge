@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <expected>
 #include <fcntl.h>
+#include <format>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <regex>
@@ -75,7 +76,7 @@ EasyMeter::handleResult(std::expected<void, ModbusError> &&result) {
   if (err.severity == ModbusError::Severity::FATAL) {
     // Fatal error occurred - initiate shutdown sequence
     logger_->error("FATAL meter error: {}", err.describe());
-    handler_.shutdown();
+    handler_.shutdown(true, std::format("meter '{}' error", cfg_.name));
     return MeterTypes::ErrorAction::SHUTDOWN;
 
   } else if (err.severity == ModbusError::Severity::TRANSIENT) {

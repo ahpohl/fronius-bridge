@@ -338,15 +338,21 @@ int main(int argc, char *argv[]) {
       bus->connect();
 
   } catch (const std::exception &ex) {
-    mainLogger->error("Startup failed: {}", ex.what());
-    handler.shutdown();
-    return EXIT_FAILURE;
+    // Funnel startup failures through the same path as runtime fatals: this
+    // clears running_, so wait() returns immediately and the failed() branch
+    // below logs the reason and exits non-zero.
+    handler.shutdown(true, ex.what());
   }
 
   // --- Wait for shutdown signal ---
   handler.wait();
 
   // --- Shutdown ---
+  if (handler.failed()) {
+    mainLogger->error("Shutting down: {}", handler.reason());
+    return EXIT_FAILURE;
+  }
+
   mainLogger->info("Shutting down due to signal {} ({})", handler.signalName(),
                    handler.signal());
 

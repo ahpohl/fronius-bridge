@@ -23,6 +23,10 @@ public:
 
 private:
   void run();
+
+  // Drives mosquitto_loop() with our own reconnect/backoff, replacing
+  // mosquitto_loop_start() (whose thread quits on a TLS/protocol rejection).
+  void networkLoop();
   MqttConfig cfg_;
 
   // Logger
@@ -32,6 +36,7 @@ private:
   std::atomic<bool> connected_{false};
   struct mosquitto *mosq_ = nullptr;
   std::thread worker_;
+  std::thread networkThread_;
   SignalHandler &handler_;
   std::mutex mutex_;
   std::condition_variable cv_;

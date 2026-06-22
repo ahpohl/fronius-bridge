@@ -29,7 +29,6 @@ Both `inverters:` and `meters:` are optional sequences; at least one device acro
 ## Status and limitations
 
 - Battery/storage data is detected but not yet supported.
-- TLS in libmosquitto not yet supported.
 
 ## Dependencies
 
@@ -125,6 +124,10 @@ mqtt:
   #password: "your-secure-password"
   queue_size: 100
   reconnect_delay: { min: 2, max: 64, exponential: true }
+  #tls:
+  #  ca_file: /etc/ssl/certs/mqtt-ca.crt
+  #  cert_file: /etc/ssl/certs/mqtt-client.crt
+  #  key_file: /etc/ssl/private/mqtt-client.key
 
 postgres:
   dsn: "host=localhost port=5432 dbname=fronius user=fronius_bridge password=your-secure-password"
@@ -193,11 +196,17 @@ Slave fields:
 - horizon: Sun-centre altitude in degrees counted as sunrise/sunset, range [-18, 20] (default -0.833, standard refraction plus solar radius). If a clear day's inverter coverage lands just over 1.0, lower this to match what the SunSpec interface reports.
 
 **mqtt**: Connection to the MQTT broker.
-- broker / port: Broker hostname and port. 1883 is the plaintext default; TLS (8883) is not yet supported.
+- broker / port: Broker hostname and port. 1883 is the plaintext default; for TLS use 8883 (the conventional secure MQTT port) and add a `tls` block.
 - topic: Base topic — subtopics (`/<class>/<name>/values`, etc.) are appended automatically. See [MQTT publishing](#mqtt-publishing).
 - user / password: Optional broker authentication.
 - queue_size: Per-topic publish queue depth. Messages beyond this limit are dropped.
 - reconnect_delay: Same semantics as the per-device `reconnect_delay`.
+- tls *(optional)*: Secures the broker connection with TLS. Present means TLS, absent means plaintext. An empty block (`tls: {}`) verifies the broker against the OS trust store, which is enough for a broker using a public CA (e.g. Let's Encrypt). Keys:
+  - ca_file / ca_path: PEM CA file, or a directory of PEM CA certificates, that signed the broker certificate. Use these for a private CA.
+  - cert_file / key_file: Client certificate and private key for mutual TLS. Both must be set together, and a `ca_file` or `ca_path` is required alongside them.
+  - tls_version: TLS protocol version (e.g. `tlsv1.2`, `tlsv1.3`). Defaults to the libmosquitto/OpenSSL default when omitted.
+  - ciphers: OpenSSL cipher list. See `openssl ciphers` for a list of supported ciphers. Defaults to the library default when omitted.
+  - insecure: Disables broker certificate and hostname verification. Accepts a self-signed certificate but provides no security — for testing only, default `false`.
 
 **postgres** *(optional)*: Enables the PostgreSQL/TimescaleDB consumer. Omit the whole section to run MQTT-only. Each device is written into its own schema named after the device (`name`); full database setup, rollups, and query patterns are described in [DEPLOYMENT.md](DEPLOYMENT.md).
 - dsn: libpq connection string (e.g. `host=localhost port=5432 dbname=fronius user=fronius_bridge password=...`). Mandatory when the section is present.
@@ -441,7 +450,7 @@ Energy counters (`energy_*`) are cumulative values maintained by the physical me
 
 ## Security
 
-- Prefer running MQTT behind a trusted network or VPN. If using authentication, set `mqtt.user`/`mqtt.password` and restrict the config file with `chmod 0600`.
+- Prefer running MQTT behind a trusted network or VPN. If using authentication, set `mqtt.user`/`mqtt.password` and restrict the config file with `chmod 0600`. To encrypt the broker connection, enable `mqtt.tls` (see the `tls` keys above); credentials sent in plaintext are otherwise visible on the wire.
 - Binding a meter's `slave.tcp.port` to a port below 1024 requires elevated privileges or `CAP_NET_BIND_SERVICE`. Use `--user`/`--group` to drop privileges after startup once the listener is bound.
 
 ## License

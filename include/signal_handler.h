@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <csignal>
 #include <mutex>
+#include <string>
 
 class SignalHandler {
 public:
@@ -36,9 +37,17 @@ public:
   SignalHandler &operator=(const SignalHandler &) = delete;
 
   // --- Programmatic shutdown ---
-  void shutdown() {
+  // `failure` marks a non-recoverable error (vs. a signal or clean stop) so the
+  // process exits with a failure status; `reason` is the message main reports,
+  // mirroring signalName() for the signal case. The signal handler calls the
+  // no-arg form, keeping signal-driven shutdowns successful.
+  void shutdown(bool failure = false, std::string reason = {}) {
     {
       std::lock_guard<std::mutex> lock(mtx_);
+      if (failure) {
+        failed_.store(true);
+        reason_ = std::move(reason);
+      }
       running_.store(false);
     }
     cv_.notify_all();
@@ -50,15 +59,17 @@ public:
     cv_.wait(lock, [&] { return !running_.load(); });
   }
 
-  const char *signalName() const {
-    return signal_ ? strsignal(signal_) : "internal request";
-  }
+  const char *signalName() const { return strsignal(signal_); }
 
   int signal() const { return signal_; }
   bool isRunning() const { return running_.load(); }
+  bool failed() const { return failed_.load(); }
+  const std::string &reason() const { return reason_; }
 
 private:
   std::atomic<bool> running_;
+  std::atomic<bool> failed_{false};
+  std::string reason_;
   std::mutex mtx_;
   std::condition_variable cv_;
   static inline SignalHandler *instance_ = nullptr;

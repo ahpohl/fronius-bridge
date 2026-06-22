@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <expected>
+#include <format>
 #include <fronius/fronius_bus.h>
 #include <fronius/fronius_types.h>
 #include <fronius/modbus_config.h>
@@ -55,7 +56,8 @@ FroniusMeter::FroniusMeter(const MeterConfig &cfg, SignalHandler &signalHandler,
       bus_->addBusErrorCallback([this](const ModbusError &err) {
         if (err.severity == ModbusError::Severity::FATAL) {
           logger_->error("FATAL Modbus bus error: {}", err.describe());
-          handler_.shutdown();
+          handler_.shutdown(
+              true, std::format("meter '{}' Modbus bus error", cfg_.name));
         } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
           logger_->trace("Modbus bus operation cancelled due to shutdown: {}",
                          err.describe());
@@ -83,7 +85,8 @@ FroniusMeter::FroniusMeter(const MeterConfig &cfg, SignalHandler &signalHandler,
   meter_->setDeviceErrorCallback([this](const ModbusError &err) {
     if (err.severity == ModbusError::Severity::FATAL) {
       logger_->error("FATAL Modbus error: {}", err.describe());
-      handler_.shutdown();
+      handler_.shutdown(true,
+                        std::format("meter '{}' Modbus error", cfg_.name));
 
     } else if (err.severity == ModbusError::Severity::TRANSIENT) {
       logger_->debug("Transient Modbus error: {}", err.describe());

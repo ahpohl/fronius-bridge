@@ -62,6 +62,7 @@ find_package(nlohmann_json REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(CLI11 REQUIRED)
+find_package(OpenSSL REQUIRED)
 find_package(PkgConfig REQUIRED)
 option(FRONIUS_STATIC "Link libfronius statically" OFF)
 pkg_check_modules(MOSQUITTO REQUIRED IMPORTED_TARGET libmosquitto)
@@ -133,6 +134,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     CLI11::CLI11
     PkgConfig::MOSQUITTO
     PkgConfig::LIBPQ
+    OpenSSL::SSL
     $<IF:$<BOOL:${FRONIUS_STATIC}>,fronius_static,PkgConfig::FRONIUS>
 )
 

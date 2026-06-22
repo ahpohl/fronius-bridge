@@ -72,6 +72,10 @@ mqtt:
   #password: "your-secure-password"
   queue_size: 100
   reconnect_delay: { min: 2, max: 64, exponential: true }
+  #tls:
+  #  ca_file: /etc/ssl/certs/mqtt-ca.crt
+  #  cert_file: /etc/ssl/certs/mqtt-client.crt
+  #  key_file: /etc/ssl/private/mqtt-client.key
 
 postgres:
   dsn: "host=localhost port=5432 dbname=fronius user=fronius_bridge password=your-secure-password"
