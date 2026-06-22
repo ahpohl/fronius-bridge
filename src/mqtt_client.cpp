@@ -12,11 +12,6 @@
 #include <unistd.h>
 
 namespace {
-// libmosquitto cert_reqs values for mosquitto_tls_opts_set, mirroring
-// OpenSSL's SSL_VERIFY_NONE and SSL_VERIFY_PEER.
-constexpr int tlsVerifyNone = 0;
-constexpr int tlsVerifyPeer = 1;
-
 // libmosquitto's tls_set() collapses a missing or unreadable file into an
 // opaque INVAL; check first so the throw can name the path and the reason.
 void requireReadable(const std::optional<std::string> &path, const char *what) {
@@ -123,7 +118,7 @@ MqttClient::MqttClient(const MqttConfig &cfg, SignalHandler &signalHandler)
     // defaults. insecure relaxes verification to SSL_VERIFY_NONE; otherwise the
     // default SSL_VERIFY_PEER stands.
     if (tls.tlsVersion.has_value() || tls.ciphers.has_value() || tls.insecure) {
-      const int certReqs = tls.insecure ? tlsVerifyNone : tlsVerifyPeer;
+      const int certReqs = tls.insecure ? SSL_VERIFY_NONE : SSL_VERIFY_PEER;
       rc = mosquitto_tls_opts_set(mosq_, certReqs, opt_c_str(tls.tlsVersion),
                                   opt_c_str(tls.ciphers));
       if (rc != MOSQ_ERR_SUCCESS) {
