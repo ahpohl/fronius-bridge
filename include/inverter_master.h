@@ -8,14 +8,11 @@
 #include <atomic>
 #include <condition_variable>
 #include <expected>
-#include <fronius/fronius_bus.h>
-#include <fronius/inverter.h>
-#include <fronius/modbus_config.h>
+#include <fronius/fronius.h>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
-#include <optional>
 #include <spdlog/logger.h>
 #include <thread>
 
@@ -38,7 +35,7 @@ public:
   InverterTypes::Values getValues(void) const;
 
   std::expected<void, ModbusError> updateValuesAndJson(void);
-  std::expected<void, ModbusError> updateEventsAndJson(void);
+  std::expected<bool, ModbusError> updateEventsAndJson(void);
   // Returns true if the device identity was read on this call and differs
   // from what was last emitted (so runLoop should publish it), false if the
   // identity was already read and is unchanged. The inverter is read over
@@ -56,6 +53,11 @@ public:
 private:
   static ModbusDeviceConfig makeDeviceConfig(const InverterConfig &cfg);
   void runLoop();
+
+  // Publish an availability state ("connected"/"disconnected")
+  // through the gate, so each distinct state is emitted once on transition.
+  // Thread-safe; called from the bus callbacks and runLoop.
+  void publishAvailability(std::string state);
 
   std::shared_ptr<FroniusBus> bus_;
   std::shared_ptr<Inverter> inverter_;
@@ -76,7 +78,6 @@ private:
   nlohmann::ordered_json jsonValues_;
   nlohmann::ordered_json jsonEvents_;
   nlohmann::json jsonDevice_;
-  std::optional<std::size_t> lastEventsHash_;
 
   // --- threading / callbacks ---
   std::function<void(std::string, InverterTypes::Values)> valueCallback_;
@@ -89,10 +90,10 @@ private:
   std::atomic<bool> connected_{false};
   std::condition_variable cv_;
 
-  // Emits the device callback only when the identity actually changes. The
-  // inverter is read over Modbus, so identity is read once (hasValue() guards
-  // the re-read) and the gate records that single value.
+  // --- change gates
+  ChangeGate<InverterTypes::Events> eventsGate_;
   ChangeGate<InverterTypes::Device> deviceGate_;
+  ChangeGate<std::string> availabilityGate_;
 };
 
 #endif /* INVERTER_MASTER_H_ */

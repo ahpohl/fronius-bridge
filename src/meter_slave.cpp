@@ -7,10 +7,8 @@
 #include <cstring>
 #include <expected>
 #include <format>
-#include <fronius/common_registers.h>
-#include <fronius/meter_registers.h>
-#include <fronius/modbus_error.h>
-#include <fronius/modbus_utils.h>
+#include <fronius/fronius.h>
+#include <fronius/registers.h>
 #include <memory>
 #include <modbus/modbus.h>
 #include <poll.h>

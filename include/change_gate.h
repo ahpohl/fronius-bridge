@@ -2,7 +2,6 @@
 #define CHANGE_GATE_H_
 
 #include <optional>
-#include <utility>
 
 // Change detector shared by the device producers (the inverter/meter masters)
 // to emit device metadata only when it actually changes instead of on every

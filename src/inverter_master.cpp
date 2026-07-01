@@ -5,15 +5,10 @@
 #include <chrono>
 #include <expected>
 #include <format>
-#include <fronius/fronius_bus.h>
-#include <fronius/fronius_types.h>
-#include <fronius/inverter.h>
-#include <fronius/modbus_config.h>
-#include <fronius/modbus_error.h>
+#include <fronius/fronius.h>
 #include <functional>
 #include <mutex>
 #include <nlohmann/json.hpp>
-#include <sstream>
 
 using json = nlohmann::ordered_json;
 
@@ -66,16 +61,12 @@ InverterMaster::InverterMaster(const InverterConfig &cfg,
     logger_->debug("Inverter '{}' register map: {}", cfg_.name,
                    FroniusTypes::toString(map));
     connected_.store(true);
-
-    if (availabilityCallback_)
-      availabilityCallback_("connected");
+    publishAvailability("connected");
   });
 
   inverter_->setDeviceUnavailableCallback([this] {
     connected_.store(false);
-
-    if (availabilityCallback_)
-      availabilityCallback_("disconnected");
+    publishAvailability("disconnected");
   });
 
   inverter_->setDeviceErrorCallback([this](const ModbusError &err) {
@@ -138,9 +129,8 @@ InverterMaster::~InverterMaster() {
   // Fire one final availability update so MQTT consumers see this inverter
   // go offline. Done after the worker join so it can't race with an
   // in-flight update*AndJson(). Safe because main destroys masters before
-  // destroying MqttClient.
-  if (availabilityCallback_)
-    availabilityCallback_("disconnected");
+  // destroying MqttClient. The gate suppresses it only if already offline.
+  publishAvailability("disconnected");
 
   logger_->info("Inverter '{}' disconnected", cfg_.name);
 }
@@ -180,11 +170,11 @@ void InverterMaster::runLoop() {
           valueCallback_(std::move(json), std::move(vals));
         }
 
-        // --- Events (de-duplicated by lastEventsHash_ inside the update) ---
+        // --- Events (de-duplicated by eventsGate_; published on change) ---
         auto eventsResult = updateEventsAndJson();
         if (!eventsResult) {
           connected_.store(false);
-        } else if (eventCallback_ && handler_.isRunning()) {
+        } else if (*eventsResult && eventCallback_ && handler_.isRunning()) {
           std::string json;
           InverterTypes::Events evts;
           {
@@ -228,6 +218,21 @@ void InverterMaster::setAvailabilityCallback(
     std::function<void(std::string)> cb) {
   std::lock_guard<std::mutex> lock(cbMutex_);
   availabilityCallback_ = std::move(cb);
+}
+
+void InverterMaster::publishAvailability(std::string state) {
+  // Decide under the lock (availabilityGate_ is shared with the bus-callback
+  // threads and the destructor), then fire outside it, matching the
+  // release-before-callback pattern used for values and events in runLoop.
+  // Unwired: the short-circuit skips changed(), so nothing latches and a later
+  // publish still fires; otherwise emit only on a real transition.
+  bool emit;
+  {
+    std::lock_guard<std::mutex> lock(cbMutex_);
+    emit = availabilityCallback_ && availabilityGate_.changed(state);
+  }
+  if (emit)
+    availabilityCallback_(std::move(state));
 }
 
 std::string InverterMaster::getJsonDump() const {
@@ -401,7 +406,7 @@ std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
   }
   newJson["inputs"] = std::move(inputs);
 
-  logger_->debug("{}", newJson.dump());
+  logger_->debug("'{}' values: {}", cfg_.name, newJson.dump());
 
   // ---- Commit values ----
   {
@@ -413,7 +418,7 @@ std::expected<void, ModbusError> InverterMaster::updateValuesAndJson() {
   return {};
 }
 
-std::expected<void, ModbusError> InverterMaster::updateEventsAndJson() {
+std::expected<bool, ModbusError> InverterMaster::updateEventsAndJson() {
   if (!handler_.isRunning()) {
     return std::unexpected(ModbusError::custom(
         EINTR, "updateEventsAndJson(): Shutdown in progress"));
@@ -430,23 +435,6 @@ std::expected<void, ModbusError> InverterMaster::updateEventsAndJson() {
     return std::unexpected(err);
   }
 
-  if (!newEvents.events.empty()) {
-    std::ostringstream oss;
-    for (size_t i = 0; i < newEvents.events.size(); ++i) {
-      oss << newEvents.events[i];
-      if (i + 1 < newEvents.events.size())
-        oss << ", ";
-    }
-    const std::size_t currentHash = std::hash<std::string>{}(oss.str());
-
-    if (!lastEventsHash_.has_value() || currentHash != *lastEventsHash_) {
-      logger_->warn("Inverter reported events: [{}]", oss.str());
-      lastEventsHash_ = currentHash;
-    }
-  } else {
-    lastEventsHash_.reset();
-  }
-
   // ---- Build JSON ----
   json newJson;
 
@@ -457,7 +445,12 @@ std::expected<void, ModbusError> InverterMaster::updateEventsAndJson() {
     newJson["events"].push_back(e);
   }
 
-  logger_->debug("{}", newJson.dump());
+  // De-duplicate the whole snapshot. Log the event list on a change, tagged
+  // with the active state code so a re-log driven by a state change (not the
+  // list itself) is self-explanatory.
+  const bool changed = eventsGate_.changed(newEvents);
+  if (changed)
+    logger_->debug("'{}' events: {}", cfg_.name, newJson.dump());
 
   // ---- Commit events ----
   {
@@ -466,7 +459,7 @@ std::expected<void, ModbusError> InverterMaster::updateEventsAndJson() {
     events_ = std::move(newEvents);
   }
 
-  return {};
+  return changed;
 }
 
 std::expected<bool, ModbusError> InverterMaster::updateDeviceAndJson() {
@@ -507,8 +500,9 @@ std::expected<bool, ModbusError> InverterMaster::updateDeviceAndJson() {
 
   // Compare received slave ID with configured
   if (cfg_.slaveId != newDevice.slaveID) {
-    logger_->warn("Slave ID mismatch: configured {}, received {}", cfg_.slaveId,
-                  newDevice.slaveID);
+    logger_->warn(
+        "Inverter '{}': Slave ID mismatch: configured {}, received {}",
+        cfg_.name, cfg_.slaveId, newDevice.slaveID);
   }
 
   // ---- Build ordered JSON ----
@@ -527,7 +521,7 @@ std::expected<bool, ModbusError> InverterMaster::updateDeviceAndJson() {
   newJson["phases"] = newDevice.phases;
   newJson["power_rating"] = newDevice.acPowerApparent;
 
-  logger_->debug("{}", newJson.dump());
+  logger_->debug("'{}' device: {}", cfg_.name, newJson.dump());
 
   // Record the identity as the baseline so the hasValue() guard short-circuits
   // the Modbus re-read on subsequent polls; this is the first (and only) read,

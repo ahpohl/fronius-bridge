@@ -6,7 +6,7 @@
 #include "signal_handler.h"
 #include <atomic>
 #include <expected>
-#include <fronius/modbus_error.h>
+#include <fronius/fronius.h>
 #include <memory>
 #include <modbus/modbus.h>
 #include <mutex>

@@ -519,14 +519,14 @@ std::expected<void, ModbusError> EasyMeter::updateValuesAndJson() {
   newJson["voltage_pp"] = values.ppVoltage;
   newJson["phases"] = phases;
 
+  logger_->debug("'{}' values: {}", cfg_.name, newJson.dump());
+
   // Update shared values and JSON with lock
   {
     std::lock_guard<std::mutex> lock(cbMutex_);
     values_ = std::move(values);
     jsonValues_ = std::move(newJson);
   }
-
-  logger_->debug("{}", jsonValues_.dump());
 
   return {};
 }
@@ -605,8 +605,6 @@ std::expected<void, ModbusError> EasyMeter::updateDeviceAndJson() {
   newJson["options"] = newDevice.options;
   newJson["phases"] = newDevice.phases;
 
-  logger_->debug("{}", newJson.dump());
-
   // ---- Commit values ----
   {
     std::lock_guard<std::mutex> lock(cbMutex_);
@@ -644,11 +642,13 @@ void EasyMeter::runLoop() {
 
     if (handler_.isRunning()) {
       std::lock_guard<std::mutex> lock(cbMutex_);
-      // Emit only when the identity changed since the last emission; the EBZ
-      // re-parses it from every telegram, so without this it would republish
-      // once per poll.
-      if (deviceCallback_ && deviceGate_.changed(device_)) {
-        deviceCallback_(jsonDevice_.dump(), device_);
+      // The EBZ re-parses the identity from every telegram. Gate the log and
+      // the publish on a single change check so they fire once, together, and
+      // the gate keeps a single owner regardless of whether a callback is set.
+      if (deviceGate_.changed(device_)) {
+        logger_->debug("'{}' device: {}", cfg_.name, jsonDevice_.dump());
+        if (deviceCallback_)
+          deviceCallback_(jsonDevice_.dump(), device_);
       }
     }
 

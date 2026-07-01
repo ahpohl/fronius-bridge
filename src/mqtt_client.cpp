@@ -143,15 +143,18 @@ MqttClient::MqttClient(const MqttConfig &cfg, SignalHandler &signalHandler)
   mosquitto_log_callback_set(mosq_, MqttClient::onLog);
 
   // We drive mosquitto_loop() ourselves and publish from the worker thread.
-  // Without loop_start libmosquitto runs single-threaded, so mosquitto_publish()
-  // would write inline and race the loop on the same TLS connection (bad record
-  // mac); threaded_set defers writes to the loop thread, as loop_start did.
+  // Without loop_start libmosquitto runs single-threaded, so
+  // mosquitto_publish() would write inline and race the loop on the same TLS
+  // connection (bad record mac); threaded_set defers writes to the loop thread,
+  // as loop_start did.
   mosquitto_threaded_set(mosq_, true);
 
   // Only initiate here; networkLoop() drives the handshake and all reconnects
-  // (mosquitto_loop_start would quit on a TLS/protocol rejection). connect_async
-  // just validates and queues, so a failure now is a real setup error.
-  int rc = mosquitto_connect_async(mosq_, opt_c_str(cfg_.broker), cfg_.port, 60);
+  // (mosquitto_loop_start would quit on a TLS/protocol rejection).
+  // connect_async just validates and queues, so a failure now is a real setup
+  // error.
+  int rc =
+      mosquitto_connect_async(mosq_, opt_c_str(cfg_.broker), cfg_.port, 60);
   if (rc != MOSQ_ERR_SUCCESS) {
     mosquitto_destroy(mosq_);
     mosq_ = nullptr;
@@ -328,9 +331,9 @@ void MqttClient::onConnect(struct mosquitto *mosq, void *obj, int rc) {
       self->logger_->warn("MQTT connection failed: {} ({})",
                           mosquitto_connack_string(rc), rc);
     } else {
-      self->handler_.shutdown(
-          true, std::format("MQTT connection failed: {} ({})",
-                            mosquitto_connack_string(rc), rc));
+      self->handler_.shutdown(true,
+                              std::format("MQTT connection failed: {} ({})",
+                                          mosquitto_connack_string(rc), rc));
     }
     return;
   }

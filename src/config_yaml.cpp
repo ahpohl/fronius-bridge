@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <format>
-#include <fronius/modbus_config.h>
+#include <fronius/fronius.h>
 #include <map>
 #include <optional>
 #include <regex>
@@ -653,33 +653,28 @@ static LoggerConfig parseLogger(const YAML::Node &node) {
   return cfg;
 }
 
-// Parse the optional `site:` section: the installation's latitude/longitude.
-// Both keys are optional and validated to real-world ranges when present; an
-// absent section leaves both unset (no daylight figure is derived). Only
-// latitude feeds the daylight calculation; longitude is stored for future use.
+// Parse the `site:` section: coordinates and horizon. latitude and longitude
+// are mandatory (the section exists to place the site); horizon is optional,
+// defaulting to the geometric horizon.
 static SiteConfig parseSite(const YAML::Node &node) {
   SiteConfig cfg;
-  if (!node)
-    return cfg;
 
-  if (node["latitude"]) {
-    const double v = node["latitude"].as<double>();
-    if (v < -90.0 || v > 90.0)
-      throw std::invalid_argument("site.latitude must be in range [-90, 90]");
-    cfg.latitude = v;
-  }
-  if (node["longitude"]) {
-    const double v = node["longitude"].as<double>();
-    if (v < -180.0 || v > 180.0)
-      throw std::invalid_argument(
-          "site.longitude must be in range [-180, 180]");
-    cfg.longitude = v;
-  }
+  if (!node["latitude"])
+    throw std::invalid_argument("site.latitude is required");
+  cfg.latitude = node["latitude"].as<double>();
+  if (cfg.latitude < -90.0 || cfg.latitude > 90.0)
+    throw std::invalid_argument("site.latitude must be in range [-90, 90]");
+
+  if (!node["longitude"])
+    throw std::invalid_argument("site.longitude is required");
+  cfg.longitude = node["longitude"].as<double>();
+  if (cfg.longitude < -180.0 || cfg.longitude > 180.0)
+    throw std::invalid_argument("site.longitude must be in range [-180, 180]");
+
   if (node["horizon"]) {
-    const double v = node["horizon"].as<double>();
-    if (v < -18.0 || v > 20.0)
+    cfg.horizon = node["horizon"].as<double>();
+    if (cfg.horizon < -18.0 || cfg.horizon > 20.0)
       throw std::invalid_argument("site.horizon must be in range [-18, 20]");
-    cfg.horizon = v;
   }
 
   return cfg;
@@ -1120,7 +1115,8 @@ AppConfig loadConfig(const std::string &path) {
   cfg.mqtt = parseMqtt(root["mqtt"]);
   cfg.postgres = parsePostgres(root["postgres"]);
   cfg.logger = parseLogger(root["logger"]);
-  cfg.site = parseSite(root["site"]);
+  if (root["site"])
+    cfg.site = parseSite(root["site"]);
 
   validateConfig(cfg);
 

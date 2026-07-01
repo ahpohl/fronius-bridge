@@ -2,7 +2,6 @@
 #include "db_error.h"
 #include <charconv>
 #include <cmath>
-#include <cstddef>
 #include <expected>
 #include <format>
 #include <libpq-fe.h>

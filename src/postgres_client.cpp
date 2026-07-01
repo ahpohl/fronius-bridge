@@ -17,7 +17,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <spdlog/logger.h>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <string>
@@ -79,8 +78,9 @@ void routeNotice(void *arg, const PGresult *res) {
 
 PostgresClient::PostgresClient(const PostgresConfig &cfg,
                                std::vector<DeviceRegistryEntry> registry,
-                               SiteConfig site, SignalHandler &signalHandler)
-    : cfg_(cfg), registry_(std::move(registry)), site_(site),
+                               std::optional<SiteConfig> site,
+                               SignalHandler &signalHandler)
+    : cfg_(cfg), registry_(std::move(registry)), site_(std::move(site)),
       handler_(signalHandler) {
   // Synchronous validation only. The connection is established lazily by the
   // worker so a transient DB outage at startup does not block the bridge;
@@ -185,8 +185,7 @@ void PostgresClient::run() {
         // Configuration / schema / privilege / missing-extension error:
         // retrying produces the same failure forever. Escalate to shutdown so
         // the operator gets a non-zero exit and a chance to fix the cause.
-        postgresLogger_->error("Postgres setup failed: {}",
-                               err.describe());
+        postgresLogger_->error("Postgres setup failed: {}", err.describe());
         handler_.shutdown(true, "Postgres setup failed");
         break;
       }
@@ -218,8 +217,7 @@ void PostgresClient::run() {
         const auto &err = result.error();
 
         if (err.severity == DbError::Severity::FATAL) {
-          postgresLogger_->error("Postgres event failed: {}",
-                                 err.describe());
+          postgresLogger_->error("Postgres event failed: {}", err.describe());
           handler_.shutdown(true, "Postgres write failed");
           break;
         }
@@ -403,15 +401,22 @@ std::expected<void, DbError> PostgresClient::syncRegistry() {
 
   // Single-row site location (latitude/longitude, NULL when not configured).
   // Blind upsert: the boolean PK pinned to TRUE means there is only ever one
-  // row. Written every run so removing the `site:` section clears it.
+  // row. Written every run so removing the `site:` section clears it. The three
+  // columns are NULL together when there is no section; a present one always
+  // sets latitude and longitude (the config requires them).
+  const std::optional<double> lat =
+      site_ ? std::optional<double>{site_->latitude} : std::nullopt;
+  const std::optional<double> lon =
+      site_ ? std::optional<double>{site_->longitude} : std::nullopt;
+  const std::optional<double> hor =
+      site_ ? std::optional<double>{site_->horizon} : std::nullopt;
   if (auto r = conn_->execParams(
           "INSERT INTO public.site (id, latitude, longitude, horizon_deg) "
           "VALUES (TRUE, $1, $2, $3) "
           "ON CONFLICT (id) DO UPDATE SET "
           "latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude, "
           "horizon_deg = EXCLUDED.horizon_deg, updated_at = now()",
-          pg::Params{site_.latitude, site_.longitude, site_.horizon},
-          DbError::Kind::MIGRATION);
+          pg::Params{lat, lon, hor}, DbError::Kind::MIGRATION);
       !r)
     return std::unexpected(r.error());
 

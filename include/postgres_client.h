@@ -13,6 +13,7 @@
 #include <expected>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <spdlog/logger.h>
 #include <string>
@@ -60,8 +61,8 @@ public:
   // failures are not raised here - the worker handles them via the reconnect
   // loop. autoMigrate (from cfg) selects migrate vs verify per schema.
   PostgresClient(const PostgresConfig &cfg,
-                 std::vector<DeviceRegistryEntry> registry, SiteConfig site,
-                 SignalHandler &signalHandler);
+                 std::vector<DeviceRegistryEntry> registry,
+                 std::optional<SiteConfig> site, SignalHandler &signalHandler);
 
   ~PostgresClient();
 
@@ -126,7 +127,7 @@ private:
   // ------ config / shared services
   PostgresConfig cfg_;
   std::vector<DeviceRegistryEntry> registry_;
-  SiteConfig site_;
+  std::optional<SiteConfig> site_;
   SignalHandler &handler_;
   std::shared_ptr<spdlog::logger> postgresLogger_;
 

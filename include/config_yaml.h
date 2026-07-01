@@ -1,7 +1,7 @@
 #ifndef CONFIG_YAML_HPP
 #define CONFIG_YAML_HPP
 
-#include <fronius/modbus_config.h>
+#include <fronius/fronius.h>
 #include <map>
 #include <optional>
 #include <spdlog/spdlog.h>
@@ -243,19 +243,19 @@ struct LoggerConfig {
 // ---------------------------------------------------------------------------
 // Site config
 //
-// Optional installation location, written to the single-row public.site table
-// at startup. Only latitude is used for the daylight length; longitude (with
-// timezone) places sunrise/sunset. horizon_deg is the sun-centre altitude
-// counted as sunrise/sunset (-0.833 deg geometric default), a per-site
-// calibration for how far outside geometric daylight the inverter reports.
-// latitude/longitude are absent when the YAML has no `site:` section, in which
-// case no daylight figure is derived. Site-level, not per-device: one bridge
-// instance serves one site.
+// Installation location, written to the single-row public.site table at
+// startup. Latitude drives the daylight length; longitude sets the solar
+// clock; horizon is the sun-centre altitude counted as sunrise/sunset
+// (-0.833 deg geometric default), a per-site calibration for how far outside
+// geometric daylight the inverter reports. The struct is optional in AppConfig
+// and absent when there is no `site:` section; a present section must supply
+// latitude and longitude. Site-level, not per-device: one bridge instance
+// serves one site.
 // ---------------------------------------------------------------------------
 
 struct SiteConfig {
-  std::optional<double> latitude;
-  std::optional<double> longitude;
+  double latitude{0.0};  // degrees north [-90, 90]; required when site present
+  double longitude{0.0}; // degrees east [-180, 180]; required when site present
   double horizon{-0.833}; // sun-centre altitude at sunrise/sunset, in degrees
 };
 
@@ -318,7 +318,7 @@ struct AppConfig {
   MqttConfig mqtt;
   std::optional<PostgresConfig> postgres;
   LoggerConfig logger;
-  SiteConfig site;
+  std::optional<SiteConfig> site;
 
   // Derived, not parsed: the deduplicated bus registry synthesised from
   // `inverters` and `meters` by loadConfig() (there is no [buses] YAML

@@ -7,10 +7,7 @@
 #include <cmath>
 #include <expected>
 #include <format>
-#include <fronius/fronius_bus.h>
-#include <fronius/fronius_types.h>
-#include <fronius/modbus_config.h>
-#include <fronius/modbus_error.h>
+#include <fronius/fronius.h>
 #include <functional>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -429,13 +426,13 @@ std::expected<void, ModbusError> FroniusMeter::updateValuesAndJson() {
   newJson["current"] = values.current;
   newJson["phases"] = phases;
 
+  logger_->debug("'{}' values: {}", cfg_.name, newJson.dump());
+
   {
     std::lock_guard<std::mutex> lock(cbMutex_);
     values_ = std::move(values);
     jsonValues_ = std::move(newJson);
   }
-
-  logger_->debug("{}", jsonValues_.dump());
 
   return {};
 }
@@ -471,8 +468,8 @@ std::expected<bool, ModbusError> FroniusMeter::updateDeviceAndJson() {
 
   // Compare received slave ID with configured
   if (fcfg_.slaveId != newDevice.slaveID) {
-    logger_->warn("Slave ID mismatch: configured {}, received {}",
-                  fcfg_.slaveId, newDevice.slaveID);
+    logger_->warn("Meter '{}': Slave ID mismatch: configured {}, received {}",
+                  cfg_.name, fcfg_.slaveId, newDevice.slaveID);
   }
 
   // ---- Build ordered JSON ----
@@ -487,7 +484,7 @@ std::expected<bool, ModbusError> FroniusMeter::updateDeviceAndJson() {
   newJson["meter_id"] = newDevice.id;
   newJson["phases"] = newDevice.phases;
 
-  logger_->debug("{}", newJson.dump());
+  logger_->debug("'{}' device: {}", cfg_.name, newJson.dump());
 
   // Record the identity as the baseline so the hasValue() guard short-circuits
   // the Modbus re-read on subsequent polls; this is the first (and only) read,

@@ -9,12 +9,8 @@
 #include <atomic>
 #include <condition_variable>
 #include <expected>
-#include <fronius/fronius_bus.h>
-#include <fronius/meter.h>
-#include <fronius/modbus_config.h>
-#include <functional>
+#include <fronius/fronius.h>
 #include <memory>
-#include <mutex>
 #include <nlohmann/json.hpp>
 #include <spdlog/logger.h>
 #include <thread>

@@ -6,12 +6,10 @@
 #include "meter_master.h"
 #include "meter_types.h"
 #include "signal_handler.h"
-#include <atomic>
 #include <condition_variable>
 #include <expected>
-#include <fronius/modbus_error.h>
+#include <fronius/fronius.h>
 #include <memory>
-#include <mutex>
 #include <nlohmann/json.hpp>
 #include <spdlog/logger.h>
 #include <string>

@@ -3,7 +3,6 @@
 #include "pg.h"
 #include <array>
 #include <expected>
-#include <spdlog/logger.h>
 #include <spdlog/spdlog.h>
 #include <string>
 #include <string_view>

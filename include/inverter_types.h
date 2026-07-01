@@ -1,11 +1,10 @@
 #ifndef INVERTER_TYPES_H_
 #define INVERTER_TYPES_H_
 
+#include "utils.h"
 #include <cstdint>
 #include <string>
 #include <vector>
-
-#include "utils.h"
 
 struct InverterTypes {
 
@@ -75,6 +74,9 @@ struct InverterTypes {
     int activeCode{0};               // Fronius F_Active_State_Code
     std::string state;               // Inverter StVnd
     std::vector<std::string> events; // Inverter EvtVnd1-3
+
+    // Member-wise equality so ChangeGate can de-duplicate the whole snapshot.
+    bool operator==(const Events &) const = default;
   };
 
   struct Device {

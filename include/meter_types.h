@@ -1,10 +1,9 @@
 #ifndef METER_TYPES_H_
 #define METER_TYPES_H_
 
+#include "utils.h"
 #include <cstdint>
 #include <string>
-
-#include "utils.h"
 
 struct MeterTypes {
 

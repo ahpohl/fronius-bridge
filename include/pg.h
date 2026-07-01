@@ -3,7 +3,6 @@
 
 #include "db_error.h"
 #include <concepts>
-#include <cstdint>
 #include <cstdio>
 #include <expected>
 #include <libpq-fe.h>
