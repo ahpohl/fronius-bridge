@@ -48,6 +48,10 @@ constexpr char inverter004[] = {
 #embed "db/inverter/004_retention.sql"
     , 0};
 
+constexpr char inverter005[] = {
+#embed "db/inverter/005_production_span.sql"
+    , 0};
+
 constexpr char meter003[] = {
 #embed "db/meter/003_power_agg.sql"
     , 0};
@@ -81,6 +85,8 @@ constexpr std::array inverterArray = {
               std::string_view{inverter003, sizeof(inverter003) - 1}},
     Migration{4, "retention",
               std::string_view{inverter004, sizeof(inverter004) - 1}},
+    Migration{5, "production_span",
+              std::string_view{inverter005, sizeof(inverter005) - 1}},
 };
 
 constexpr std::array meterArray = {
