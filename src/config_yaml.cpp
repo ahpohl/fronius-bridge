@@ -1,6 +1,7 @@
 #include "config_yaml.h"
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <format>
 #include <fronius/fronius.h>
 #include <map>
@@ -1097,11 +1098,94 @@ static void validateConfig(const AppConfig &cfg) {
 }
 
 // ---------------------------------------------------------------------------
+// Environment variable expansion
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Expands ${NAME} references in one scalar value. "$${" escapes to a literal
+// "${" for the rare value that must contain the sequence verbatim. An unset
+// variable or a malformed reference is a hard error naming the variable and
+// the config line: silently substituting an empty string (envsubst-style)
+// would let a missing secret slip through as a wrong-but-valid config.
+std::string expandScalar(const std::string &in, const YAML::Mark &mark) {
+  static const std::regex nameRe("[A-Za-z_][A-Za-z0-9_]*");
+  std::string out;
+  out.reserve(in.size());
+  std::size_t i = 0;
+  while (i < in.size()) {
+    if (in.compare(i, 3, "$${") == 0) {
+      out += "${";
+      i += 3;
+      continue;
+    }
+    if (in.compare(i, 2, "${") == 0) {
+      const std::size_t end = in.find('}', i + 2);
+      if (end == std::string::npos)
+        throw std::runtime_error(std::format(
+            "config line {}: unterminated environment variable reference "
+            "in '{}'",
+            mark.line + 1, in));
+      const std::string name = in.substr(i + 2, end - (i + 2));
+      if (!std::regex_match(name, nameRe))
+        throw std::runtime_error(std::format(
+            "config line {}: invalid environment variable name '${{{}}}'",
+            mark.line + 1, name));
+      const char *value = std::getenv(name.c_str());
+      if (value == nullptr)
+        throw std::runtime_error(
+            std::format("config line {}: environment variable '{}' is not set",
+                        mark.line + 1, name));
+      // A set-but-empty variable is almost always a blank .env entry; letting
+      // it through would surface later as an opaque runtime failure (broker
+      // auth, DSN parse). A genuinely empty value belongs in the YAML as a
+      // literal, not behind a reference.
+      if (*value == '\0')
+        throw std::runtime_error(std::format(
+            "config line {}: environment variable '{}' is set but empty",
+            mark.line + 1, name));
+      out += value;
+      i = end + 1;
+      continue;
+    }
+    out += in[i++];
+  }
+  return out;
+}
+
+// Walks the parsed document and rewrites every scalar value containing a
+// ${NAME} reference. Runs on the YAML tree rather than the raw file text so
+// comments are never touched and every value position is covered uniformly,
+// numbers included (the scalar is rewritten before .as<T>() converts it).
+// Keys are left alone: a device name is an identity, not a deployment
+// parameter.
+void expandEnv(YAML::Node node) {
+  if (node.IsScalar()) {
+    const std::string &raw = node.Scalar();
+    if (raw.find("${") != std::string::npos)
+      node = expandScalar(raw, node.Mark());
+  } else if (node.IsSequence()) {
+    for (auto child : node)
+      expandEnv(child);
+  } else if (node.IsMap()) {
+    for (auto entry : node)
+      expandEnv(entry.second);
+  }
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 AppConfig loadConfig(const std::string &path) {
   YAML::Node root = YAML::LoadFile(path);
+
+  // Resolve ${NAME} references before any section is parsed, so parsing and
+  // validation only ever see final values.
+  expandEnv(root);
+
   AppConfig cfg;
 
   cfg.inverters = parseInverters(root["inverters"]);

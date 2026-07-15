@@ -47,6 +47,20 @@ uses **pg_cron**, which may live in a separate database on the cluster. See
 
 fronius-bridge is configured via a YAML file passed with `-c <path>` (or the `FRONIUS_CONFIG` environment variable). The `inverters:` and `meters:` keys are sequences (YAML lists); each may be empty or omitted, but at least one device across the two must be configured.
 
+### Environment variable expansion
+
+Any scalar value may reference an environment variable as `${NAME}`; the reference is resolved when the config is loaded, before parsing and validation. This keeps secrets and host-specific endpoints out of the file — the natural fit for container deployments and secret managers:
+
+```yaml
+mqtt:
+  broker: ${MQTT_BROKER}
+  password: ${MQTT_PASSWORD}
+postgres:
+  dsn: "host=${PG_HOST} port=5432 dbname=fronius user=fronius_bridge password=${PG_PASSWORD}"
+```
+
+References work in any value position, including numbers (`port: ${MODBUS_PORT}`); keys and comments are never expanded. A reference to an unset or empty variable is a fatal startup error naming the variable and config line — a missing or blank secret never degrades silently into a runtime authentication failure. A genuinely empty value belongs in the YAML as a literal, not behind a reference. Write `$${NAME}` for a literal `${NAME}`.
+
 ### Example config
 
 ```yaml
