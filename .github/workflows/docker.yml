@@ -1,9 +1,12 @@
 name: Docker
 
-# Runs on release publication rather than on the tag push: release.yml owns
-# the tag event, and an image should only exist for a release that actually
-# went out. workflow_dispatch allows re-publishing a tag manually; run it
-# from the tag ref so git describe reports the right version.
+# Runs on the same tag push as release.yml. The two workflows are
+# independent: the images build from source, not from release assets, so no
+# ordering between them is needed. A release trigger would never fire here
+# anyway, since release.yml creates the release with the workflow
+# GITHUB_TOKEN and GitHub suppresses events from that token to prevent
+# workflow recursion. workflow_dispatch allows re-publishing manually; run
+# it from the tag ref so git describe reports the right version.
 #
 # Both architectures build natively on their own runners, mirroring the deb
 # matrix in release.yml; no QEMU emulation. Each build pushes an untagged
@@ -13,8 +16,9 @@ name: Docker
 # is what groups the digests per image.
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
