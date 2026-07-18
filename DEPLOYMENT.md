@@ -1,9 +1,101 @@
-# Deploying the PostgreSQL consumer
+# Deploying fronius-bridge
 
-This guide covers the optional PostgreSQL time-series consumer: database
-prerequisites, the one-time privileged setup, how the bridge lays out data, and
-the operational workflows. The bridge runs MQTT-only when no `postgres` section
-is configured; none of this is required in that case.
+Two deployment methods are covered. [Docker](#docker-deployment) runs the whole
+stack — bridge, TimescaleDB with pg_cron, Mosquitto — from published images
+with the database setup and rollup jobs handled automatically.
+[Bare metal](#bare-metal-deployment) walks through the same setup by hand:
+database prerequisites, the one-time privileged setup, and the cron jobs. The
+[data model](#data-model-one-schema-per-device) and everything from the
+[function reference](#function-reference) onward apply to both. The bridge runs
+MQTT-only when no `postgres` section is configured; the database parts are not
+required in that case.
+
+## Docker deployment
+
+The deployment files are attached to every
+[release](https://github.com/ahpohl/fronius-bridge/releases) — no git clone
+needed. Fetch them into a fresh directory, recreating the `docker/` subpaths
+the compose file mounts from:
+
+```sh
+mkdir fronius-bridge && cd fronius-bridge
+base=https://github.com/ahpohl/fronius-bridge/releases/latest/download
+wget $base/docker-compose.yml
+wget -O .env $base/env.example
+wget -P docker/mosquitto $base/mosquitto.conf
+wget -P docker/fronius-bridge $base/config.yaml
+```
+
+Then edit `.env`: set `POSTGRES_PASSWORD` (generation command in the file), and
+point `FRONIUS_CONFIG` at your site's bridge configuration — copy
+`docker/fronius-bridge/config.yaml` as the starting point and adjust `site:`
+and the devices ([Configuration](README.md#configuration) documents every
+option). Only the postgres DSN keeps its `${VAR}` references; they are supplied
+by the compose file so the credentials stay in `.env`, shared with the database
+container's first boot. Start the stack:
+
+```sh
+docker compose up -d
+```
+
+That pulls `ghcr.io/ahpohl/fronius-bridge` and
+`ghcr.io/ahpohl/fronius-timescaledb` (pin a version with `FRONIUS_VERSION` in
+`.env`, default `latest`) plus stock Eclipse Mosquitto. On the database's first
+boot, initdb creates the database from the `POSTGRES_*` values and schedules
+both [rollup jobs](#daily-rollups-with-pg_cron) via pg_cron in your `TZ`; the
+bridge then connects, runs its migrations, and starts publishing. Nothing in
+the bare-metal database setup below needs to be done by hand.
+
+### Host access and serial devices
+
+By default nothing is published to the host; the three services only see each
+other on the compose network. Host-specific deviations belong in a
+`docker-compose.override.yml` next to the compose file, which docker compose
+merges automatically — the downloaded files stay pristine. Publishing the
+database (e.g. for Grafana on the host) and the MQTT broker, and passing RTU
+serial adapters through to the bridge, all follow the commented stanzas in
+`docker-compose.yml`; an override collecting all three looks like:
+
+```yaml
+services:
+  timescaledb:
+    ports:
+      - "5432:5432"
+  mosquitto:
+    # Anonymous broker; publish only on trusted networks.
+    ports:
+      - "1883:1883"
+  fronius-bridge:
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0
+    # The image's user is in dialout (gid 20); if the host's serial devices
+    # use a different group, add its gid here.
+    # group_add:
+    #   - "986"
+```
+
+Meter slave listeners (`slave.tcp`) likewise need their ports published on the
+`fronius-bridge` service to be reachable from outside the compose network.
+
+### Upgrading and maintenance
+
+```sh
+docker compose pull && docker compose up -d
+```
+
+If `FRONIUS_VERSION` is pinned, raise it in `.env` first. The database volume
+(`timescaledb-data`) persists across upgrades; `docker compose down -v`
+destroys it and the next start runs initdb and the job creation again.
+`POSTGRES_PASSWORD` is consumed by initdb once, on the first boot — changing it
+later means `ALTER ROLE` in the database, then updating `.env` and
+`docker compose up -d` (not `restart`, which does not re-read `.env`).
+
+Developers working from a git clone build both images from source instead of
+pulling, by layering the build override on top:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
 
 ## Data model: one schema per device
 
@@ -26,7 +118,12 @@ one day: an inverter row carries `produced_kwh`; a meter row carries
 covered (`coverage` and `continuity`, fractions in `[0, 1]`, plus `sample_count`), two
 quality flags (`complete` and `continuous`), and the day's boundary counter readings.
 
-## Requirements
+## Bare metal deployment
+
+The sections below set up by hand what the Docker stack does automatically:
+extensions, database, privileges, and the rollup jobs.
+
+### Requirements
 
 - **PostgreSQL** 14 or newer.
 - **TimescaleDB** — the per-device sample tables are hypertables, and the daily
@@ -39,7 +136,7 @@ database** and exits with a fatal error if it is missing. It does **not** check
 for `pg_cron`: that extension is a cluster-level concern that frequently lives
 in a different database, and the bridge never calls it directly.
 
-## Cluster configuration (postgresql.conf)
+### Cluster configuration (postgresql.conf)
 
 Both extensions are loaded at server start, so they belong in
 `shared_preload_libraries`, and `pg_cron` must be told which database holds its
@@ -77,7 +174,7 @@ step. If you are not running the rollup you can drop `pg_cron` from
 `shared_preload_libraries` and skip its extension entirely; the bridge never
 requires it and verifies only that `timescaledb` is present in its own database.
 
-## One-time database setup
+### One-time database setup
 
 Run as a PostgreSQL superuser. Replace the database name, role name, and
 password to taste.
@@ -107,7 +204,7 @@ write its own tables. The `timescaledb` functions live in `public`; the default
 `PUBLIC` `USAGE`/`EXECUTE` grants cover them. If you have revoked the default
 `PUBLIC` grants, also `GRANT USAGE ON SCHEMA public TO fronius_bridge`.
 
-### Least-privilege alternative
+#### Least-privilege alternative
 
 If you would rather not grant `CREATE ON DATABASE`, create the schemas yourself
 (apply the per-kind SQL in `db/inverter/` and `db/meter/`, installed under
@@ -116,7 +213,7 @@ the role `USAGE` on each schema and `INSERT` on its tables, and run the bridge
 with `--no-migrate`. In that mode the bridge only verifies each schema is at the
 expected version and writes rows; it creates nothing.
 
-## Connecting the bridge
+### Connecting the bridge
 
 Add a `postgres` section to the YAML config (see the README's configuration
 reference for every key). The DSN is a standard libpq connection string:
@@ -137,7 +234,7 @@ schema, privilege, or missing-extension error is fatal and shuts the bridge
 down with a non-zero exit so the operator notices; transient connection errors
 are retried.
 
-## Daily rollups with pg_cron
+### Daily rollups with pg_cron
 
 Schedule two jobs, both calling `compute_site_rollup`: one finalizes the
 previous day just after the local-midnight rollover, and one refreshes the

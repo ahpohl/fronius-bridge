@@ -1,0 +1,52 @@
+# =========================================
+# fronius-bridge — example docker configuration
+# =========================================
+#
+# A minimal, working configuration for the compose stack: one Fronius
+# inverter over Modbus TCP, publishing to the bundled Mosquitto broker
+# and the bundled TimescaleDB database.
+#
+# A real deployment copies this file, adjusts site and devices, and
+# points FRONIUS_CONFIG in .env at the copy. Only the postgres
+# credentials are ${VAR} references; docker-compose.yml supplies them to
+# keep the bridge in sync with the bundled database container, which is
+# initialized from the same values on first boot. An external postgres
+# server means removing the timescaledb service from the compose file
+# and writing the DSN literally in an individual config.yaml.
+
+site:
+  # New York city, Times Square
+  latitude: 40.7589
+  longitude: -73.9851
+  horizon: -0.833
+
+inverters:
+  - name: primo
+    tcp:
+      host: primo.home.arpa
+      port: 502
+    unit_id: 1
+    response_timeout: { sec: 5, usec: 0 }
+    update_interval: 4
+    reconnect_delay: { min: 5, max: 320, exponential: true }
+
+mqtt:
+  broker: mosquitto
+  port: 1883
+  topic: fronius-bridge
+  queue_size: 100
+  reconnect_delay: { min: 2, max: 64, exponential: true }
+
+postgres:
+  dsn: "host=timescaledb port=5432 dbname=${POSTGRES_DB} user=${POSTGRES_USER} password=${POSTGRES_PASSWORD}"
+  queue_size: 10000
+  reconnect_delay: { min: 2, max: 64, exponential: true }
+
+logger:
+  level: info
+  modules:
+    main: info
+    bus: info
+    mqtt: info
+    postgres: info
+    inverter: info

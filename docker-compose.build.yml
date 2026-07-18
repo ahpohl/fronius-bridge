@@ -1,0 +1,15 @@
+# Build override for developers working from a git clone: layers the local
+# source build over the published images of docker-compose.yml.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+
+services:
+  timescaledb:
+    build: docker/timescaledb
+    image: fronius-timescaledb
+    pull_policy: build
+
+  fronius-bridge:
+    build: .
+    image: fronius-bridge
+    pull_policy: build

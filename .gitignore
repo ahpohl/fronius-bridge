@@ -13,3 +13,5 @@ deploy.sh
 
 # patches
 *.patch
+.env
+docker-compose.override.yml

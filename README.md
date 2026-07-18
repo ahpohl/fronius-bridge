@@ -43,6 +43,14 @@ The optional PostgreSQL consumer additionally requires a PostgreSQL server with 
 uses **pg_cron**, which may live in a separate database on the cluster. See
 [DEPLOYMENT.md](DEPLOYMENT.md).
 
+## Docker
+
+The whole stack — bridge, TimescaleDB with pg_cron, Mosquitto — also runs from
+published multi-arch images (`ghcr.io/ahpohl/fronius-bridge`), with the
+database setup and rollup jobs handled automatically; the compose files are
+attached to every release, no git clone needed. See
+[Docker deployment](DEPLOYMENT.md#docker-deployment).
+
 ## Configuration
 
 fronius-bridge is configured via a YAML file passed with `-c <path>` (or the `FRONIUS_CONFIG` environment variable). The `inverters:` and `meters:` keys are sequences (YAML lists); each may be empty or omitted, but at least one device across the two must be configured.

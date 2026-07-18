@@ -1,0 +1,75 @@
+# Copy env.example to .env before the first start; POSTGRES_PASSWORD is the
+# only required setting. The variables below exist to keep the bridge and the
+# bundled database container in sync: the same values initialize the database
+# on first boot (name, superuser, password, pg_cron timezone) and are
+# expanded into the ${VAR} references of the bridge's postgres DSN.
+#
+# This file pulls the published images from ghcr.io; FRONIUS_VERSION in .env
+# pins a release, the default follows latest. Developers working from a git
+# clone build from source instead by layering the build override on top:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+
+x-postgres-env: &postgres-env
+  POSTGRES_DB: ${POSTGRES_DB:-fronius}
+  POSTGRES_USER: ${POSTGRES_USER:-postgres}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+  TZ: ${TZ:-Etc/UTC}
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ./docker/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    # Publish the broker to reach it from outside the compose network, e.g.
+    # to follow the bridge topics with mosquitto_sub from the host. Note the
+    # broker accepts anonymous clients, so publish only on trusted networks:
+    # ports:
+    #   - "1883:1883"
+    restart: unless-stopped
+
+  timescaledb:
+    image: ghcr.io/ahpohl/fronius-timescaledb:${FRONIUS_VERSION:-latest}
+    environment:
+      <<: *postgres-env
+    volumes:
+      - timescaledb-data:/var/lib/postgresql/data
+    # Publish the database to reach it from outside the compose network,
+    # e.g. from a Grafana instance on the host:
+    # ports:
+    #   - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  fronius-bridge:
+    image: ghcr.io/ahpohl/fronius-bridge:${FRONIUS_VERSION:-latest}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+    environment: *postgres-env
+    volumes:
+      - ${FRONIUS_CONFIG:-./docker/fronius-bridge/config.yaml}:/etc/fronius-bridge/config.yaml:ro
+    # For RTU devices, pass the serial adapters through and make sure the
+    # container user can access them: the image's fronius user is in dialout
+    # (gid 20); if your host uses a different group for serial devices, add
+    # its gid via group_add.
+    # devices:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
+    # group_add:
+    #   - "986"
+    #
+    # Meter slave listeners (slave.tcp) need their ports published to be
+    # reachable from outside the compose network:
+    # ports:
+    #   - "502:502"
+    #   - "503:503"
+    restart: unless-stopped
+
+volumes:
+  timescaledb-data:

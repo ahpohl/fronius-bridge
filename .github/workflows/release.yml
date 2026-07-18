@@ -96,6 +96,14 @@ jobs:
       contents: write
 
     steps:
+      # The deployment files are attached as release assets straight from the
+      # repository (immich model): a docker deployment fetches them from
+      # releases/latest/download/ without cloning. Asset names flatten to the
+      # basename; the deployment recreates the docker/ subpaths the compose
+      # file expects when downloading.
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -112,3 +120,7 @@ jobs:
           prerelease: false
           files: |
             dist/**
+            docker-compose.yml
+            env.example
+            docker/mosquitto/mosquitto.conf
+            docker/fronius-bridge/config.yaml

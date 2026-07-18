@@ -1,0 +1,143 @@
+name: Docker
+
+# Runs on release publication rather than on the tag push: release.yml owns
+# the tag event, and an image should only exist for a release that actually
+# went out. workflow_dispatch allows re-publishing a tag manually; run it
+# from the tag ref so git describe reports the right version.
+#
+# Both architectures build natively on their own runners, mirroring the deb
+# matrix in release.yml; no QEMU emulation. Each build pushes an untagged
+# single-arch image by digest and uploads the digest as an artifact named
+# digests-<image>-<arch>; the merge job then stitches the two digests of
+# each image into one tagged multi-arch manifest. The artifact name prefix
+# is what groups the digests per image.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: fronius-bridge
+            context: .
+            arch: amd64
+            runner: ubuntu-latest
+            platform: linux/amd64
+          - name: fronius-bridge
+            context: .
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+          - name: fronius-timescaledb
+            context: docker/timescaledb
+            arch: amd64
+            runner: ubuntu-latest
+            platform: linux/amd64
+          - name: fronius-timescaledb
+            context: docker/timescaledb
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+
+    steps:
+      # The full history and the tags must be present: the bridge image
+      # derives its version from git describe inside the build, and the
+      # .git directory is part of the build context by design.
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/${{ matrix.name }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.name }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Merge manifest (${{ matrix.name }})
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [fronius-bridge, fronius-timescaledb]
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digests-${{ matrix.name }}-*
+          merge-multiple: true
+          path: /tmp/digests
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # type=semver strips the v prefix (v1.5.8 -> 1.5.8) and only matches
+      # proper version tags; latest follows every published release.
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+
+      - name: Create multi-arch manifest
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}@sha256:%s ' *)
+
+      - name: Inspect manifest
+        run: |
+          docker buildx imagetools inspect \
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}:${{ steps.meta.outputs.version }}
