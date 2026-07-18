@@ -4,6 +4,18 @@
 
 fronius-bridge is a lightweight service that reads operational data from one or more Fronius inverters and smart meters and publishes it to MQTT as JSON. It supports both Modbus TCP (IPv4/IPv6) and Modbus RTU (serial) connections, and serialises wire access for any devices that share a physical RS-485 bus.
 
+With an inverter and a grid meter configured, the optional TimescaleDB
+persistence turns the raw telemetry into pictures like this — one day of PV
+production (Primo), house load drawn from the grid, and the self-consumption
+overlap between the two, rendered in Grafana from the 30-second power
+aggregates:
+
+![Self-consumption](docs/self-consumption.png)
+
+The same data feeds the whole-site daily energy rollup — production,
+consumption, self-consumption, and grid import/export per day (see
+[Site energy](#site-energy)).
+
 ## Features
 
 - Multiple inverters and meters per process, each identified by a configurable `name`
