@@ -1,4 +1,4 @@
-[![Build](https://github.com/ahpohl/fronius-bridge/actions/workflows/build.yml/badge.svg)](https://github.com/ahpohl/fronius-bridge/actions/workflows/build.yml) [![Docker](https://github.com/ahpohl/fronius-bridge/actions/workflows/docker.yml/badge.svg)](https://github.com/ahpohl/fronius-bridge/actions/workflows/docker.yml)
+[![Build](https://github.com/ahpohl/fronius-bridge/actions/workflows/build.yml/badge.svg)](https://github.com/ahpohl/fronius-bridge/actions/workflows/build.yml) [![Release](https://github.com/ahpohl/fronius-bridge/actions/workflows/release.yml/badge.svg)](https://github.com/ahpohl/fronius-bridge/actions/workflows/release.yml) [![Docker](https://github.com/ahpohl/fronius-bridge/actions/workflows/docker.yml/badge.svg)](https://github.com/ahpohl/fronius-bridge/actions/workflows/docker.yml)
 
 # fronius-bridge
 
