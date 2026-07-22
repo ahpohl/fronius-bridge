@@ -155,6 +155,13 @@ MeterSlave::handleResult(std::expected<void, ModbusError> &&result) {
     logger_->warn("Transient Modbus error: {}", err.describe());
     return MeterTypes::ErrorAction::RECONNECT;
 
+  } else if (err.severity == ModbusError::Severity::RECONNECT) {
+    // Same recovery as TRANSIENT, logged apart and quieter. Without this the
+    // error would fall through to ErrorAction::NONE and the listener would
+    // keep serving on a descriptor the peer has closed.
+    logger_->debug("Modbus connection lost: {}", err.describe());
+    return MeterTypes::ErrorAction::RECONNECT;
+
   } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
     logger_->trace("Modbus operation cancelled due to shutdown: {}",
                    err.describe());

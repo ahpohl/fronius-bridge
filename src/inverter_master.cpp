@@ -49,6 +49,11 @@ InverterMaster::InverterMaster(const InverterConfig &cfg,
           logger_->error("FATAL Modbus bus error: {}", err.describe());
           handler_.shutdown(
               true, std::format("inverter '{}' Modbus bus error", cfg_.name));
+        } else if (err.severity == ModbusError::Severity::RECONNECT) {
+          // libfronius drops the transport and reconnects with backoff on
+          // its own; the disconnect callback above reports that at warn
+          // level, so this only records the underlying errno.
+          logger_->debug("Modbus bus connection lost: {}", err.describe());
         } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
           logger_->trace("Modbus bus operation cancelled due to shutdown: {}",
                          err.describe());
@@ -79,6 +84,13 @@ InverterMaster::InverterMaster(const InverterConfig &cfg,
       logger_->debug("Transient Modbus error: {}", err.describe());
       connected_.store(false);
       bus_->scheduleDeviceRetry(inverter_);
+
+    } else if (err.severity == ModbusError::Severity::RECONNECT) {
+      // No scheduleDeviceRetry() here, unlike TRANSIENT: the bus is going
+      // down, so the retry would be refused, and libfronius reschedules the
+      // device itself once the transport is back.
+      logger_->debug("Modbus connection lost: {}", err.describe());
+      connected_.store(false);
 
     } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
       logger_->trace("Modbus operation cancelled due to shutdown: {}",

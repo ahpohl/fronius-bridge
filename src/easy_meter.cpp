@@ -88,6 +88,16 @@ EasyMeter::handleResult(std::expected<void, ModbusError> &&result) {
     disconnect();
     return MeterTypes::ErrorAction::RECONNECT;
 
+  } else if (err.severity == ModbusError::Severity::RECONNECT) {
+    // Same recovery as TRANSIENT: the port is closed and reopened. Kept as
+    // its own branch so the cause is distinguishable in the log, and quieter
+    // because the retry callback already warns. Without it the error would
+    // fall through to ErrorAction::NONE and the loop would carry on reading
+    // a dead descriptor.
+    logger_->debug("Meter connection lost: {}", err.describe());
+    disconnect();
+    return MeterTypes::ErrorAction::RECONNECT;
+
   } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
     // Shutdown already in progress - just exit cleanly
     logger_->trace("Meter operation cancelled due to shutdown: {}",
