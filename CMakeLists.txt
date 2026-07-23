@@ -167,6 +167,16 @@ set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
 set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 set(CPACK_DEBIAN_PACKAGE_SECTION "net")
 
+# Derive Depends from the SONAMEs the binary actually links against. Without
+# this the package declares no dependencies at all: it installs on a bare
+# machine and then fails at exec with an unresolved libfronius.so.1, and a
+# library SOVERSION bump goes unnoticed until the service does not start.
+# CPACK_DEBIAN_PACKAGE_DEPENDS is deliberately left unset -- dpkg-shlibdeps
+# covers every shared library here, and CPack appends its output to that
+# variable, so naming libfronius by hand would only duplicate the entry and
+# add a second place to bump the version.
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+
 # TGZ custom archive name
 string(TOLOWER "${CMAKE_SYSTEM_NAME}" OS_NAME)
 string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" ARCH)

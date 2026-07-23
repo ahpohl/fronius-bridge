@@ -53,7 +53,8 @@ jobs:
             libspdlog-dev \
             nlohmann-json3-dev \
             libcli11-dev \
-            libpq-dev
+            libpq-dev \
+            dpkg-dev
 
       # Install libfronius runtime + dev from its Releases
       - name: Download libfronius debs
