@@ -56,12 +56,17 @@ jobs:
             libpq-dev \
             dpkg-dev
 
-      # Install libfronius runtime + dev from its Releases
+      # Install libfronius runtime + dev from its Releases. The tag is pinned so
+      # a released deb is reproducible: an unpinned download resolves to
+      # whatever the newest library release happens to be at the moment the
+      # workflow runs, which means re-running a release produces a package
+      # linked against a different library than the original run did.
       - name: Download libfronius debs
         env:
           GH_TOKEN: ${{ github.token }}
+          LIBFRONIUS_VERSION: v1.3.6
         run: |
-          gh release download --repo ahpohl/libfronius --pattern "libfronius*_${{ matrix.deb_arch }}.deb" --clobber
+          gh release download "${LIBFRONIUS_VERSION}" --repo ahpohl/libfronius --pattern "libfronius*_${{ matrix.deb_arch }}.deb" --clobber
           ls -l *.deb
 
       - name: Install libfronius debs
