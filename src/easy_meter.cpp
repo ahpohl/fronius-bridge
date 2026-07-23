@@ -28,9 +28,8 @@ EasyMeter::EasyMeter(const MeterConfig &cfg, SignalHandler &signalHandler)
     : cfg_(cfg), ecfg_(std::get<EasyMeterConfig>(cfg.body)),
       handler_(signalHandler) {
 
-  // Logger chain: meter.master -> meter -> default. Same convention as
-  // FroniusMeter; the EBZ's master-side diagnostics are telegram
-  // framing / OBIS parsing rather than Modbus, but the routing is identical.
+  // Logger chain: meter.master -> meter -> default, the same convention as
+  // FroniusMeter, so all meter masters share one configurable module.
   logger_ = spdlog::get("meter.master");
   if (!logger_)
     logger_ = spdlog::get("meter");
@@ -46,23 +45,21 @@ EasyMeter::~EasyMeter() {
   if (worker_.joinable())
     worker_.join();
   disconnect();
+
+  logger_->info("Meter '{}' disconnected", cfg_.name);
 }
 
 void EasyMeter::disconnect(void) {
   if (serialPort_ != -1) {
     close(serialPort_);
     serialPort_ = -1;
-
-    if (availabilityCallback_)
-      availabilityCallback_("disconnected");
-
-    logger_->info("Meter '{}' disconnected", cfg_.name);
+    publishAvailability("disconnected");
   }
-  {
-    std::unique_lock<std::mutex> lock(cbMutex_);
-    cv_.wait_for(lock, std::chrono::seconds(1),
-                 [this] { return !handler_.isRunning(); });
-  }
+}
+
+void EasyMeter::sleepBackoff(std::chrono::seconds duration) {
+  std::unique_lock<std::mutex> lock(cbMutex_);
+  cv_.wait_for(lock, duration, [this] { return !handler_.isRunning(); });
 }
 
 MeterTypes::ErrorAction
@@ -80,20 +77,19 @@ EasyMeter::handleResult(std::expected<void, ModbusError> &&result) {
     return MeterTypes::ErrorAction::SHUTDOWN;
 
   } else if (err.severity == ModbusError::Severity::TRANSIENT) {
-    // Temporary error - disconnect, wait and reconnect. Telegram framing
-    // errors (EPROTO) land here too: disconnect() closes the port, tryConnect
-    // reopens it and flushes the serial buffers, so the next readTelegram
-    // re-syncs the stream from scratch.
-    logger_->warn("Transient meter error: {}", err.describe());
+    // Temporary error - disconnect, wait and reconnect. Telegram framing errors
+    // (EPROTO) land here too: tryConnect reopens the port and flushes the
+    // serial buffers, so the next readTelegram re-syncs the stream. Logged at
+    // debug because reconnectWait() reports the outage at warn; this line only
+    // records the underlying errno.
+    logger_->debug("Transient meter error: {}", err.describe());
     disconnect();
     return MeterTypes::ErrorAction::RECONNECT;
 
   } else if (err.severity == ModbusError::Severity::RECONNECT) {
-    // Same recovery as TRANSIENT: the port is closed and reopened. Kept as
-    // its own branch so the cause is distinguishable in the log, and quieter
-    // because the retry callback already warns. Without it the error would
-    // fall through to ErrorAction::NONE and the loop would carry on reading
-    // a dead descriptor.
+    // Same recovery as TRANSIENT, kept as its own branch so the cause is
+    // distinguishable in the log. Without it the error would fall through to
+    // ErrorAction::NONE and the loop would read on through a dead descriptor.
     logger_->debug("Meter connection lost: {}", err.describe());
     disconnect();
     return MeterTypes::ErrorAction::RECONNECT;
@@ -225,8 +221,7 @@ std::expected<void, ModbusError> EasyMeter::tryConnect(void) {
                 ecfg_.rtu.dataBits, parityToChar(ecfg_.rtu.parity),
                 ecfg_.rtu.stopBits, ecfg_.rtu.baud);
 
-  if (availabilityCallback_)
-    availabilityCallback_("connected");
+  publishAvailability("connected");
 
   return {};
 }
@@ -627,34 +622,65 @@ std::expected<void, ModbusError> EasyMeter::updateDeviceAndJson() {
 
 void EasyMeter::runLoop() {
 
+  const std::chrono::seconds minDelay{ecfg_.reconnectDelay.min};
+  const std::chrono::seconds maxDelay{ecfg_.reconnectDelay.max};
+  const bool exponential = ecfg_.reconnectDelay.exponential;
+
+  std::chrono::seconds backoff{minDelay};
+
+  // Wait out the current backoff, then grow it for the next attempt: doubled
+  // and capped at max when exponential, otherwise held at min. Same math as the
+  // libfronius bus and the postgres/mqtt workers, so a dead adapter backs off
+  // instead of hammering the device node. This is the only warn-level notice on
+  // the EBZ path; everything routing here has recorded its errno at debug.
+  auto reconnectWait = [&] {
+    auto delay = backoff.count();
+    logger_->warn("Meter '{}' disconnected, trying to reconnect in {} {}...",
+                  cfg_.name, delay, delay == 1 ? "second" : "seconds");
+    sleepBackoff(backoff);
+    backoff = exponential ? std::min(backoff * 2, maxDelay) : minDelay;
+  };
+
   while (handler_.isRunning()) {
 
     // Connect to meter
     auto connectAction = handleResult(tryConnect());
     if (connectAction == MeterTypes::ErrorAction::SHUTDOWN)
       break;
-    else if (connectAction == MeterTypes::ErrorAction::RECONNECT)
+    else if (connectAction == MeterTypes::ErrorAction::RECONNECT) {
+      reconnectWait();
       continue;
+    }
 
     // Read telegram - on any error, loop restarts (will try reconnect)
     auto readAction = handleResult(readTelegram());
     if (readAction == MeterTypes::ErrorAction::SHUTDOWN)
       break;
-    else if (readAction == MeterTypes::ErrorAction::RECONNECT)
+    else if (readAction == MeterTypes::ErrorAction::RECONNECT) {
+      reconnectWait();
       continue;
+    }
+
+    // A telegram arrived: the serial link is proven live, so reset the backoff.
+    // Anchoring the reset on real data rather than on tryConnect (a no-op once
+    // the port is open) stops a half-alive adapter that opens but emits nothing
+    // from resetting the ramp on every iteration.
+    backoff = minDelay;
 
     // Update device
     auto deviceAction = handleResult(updateDeviceAndJson());
     if (deviceAction == MeterTypes::ErrorAction::SHUTDOWN)
       break;
-    else if (deviceAction == MeterTypes::ErrorAction::RECONNECT)
+    else if (deviceAction == MeterTypes::ErrorAction::RECONNECT) {
+      reconnectWait();
       continue;
+    }
 
     if (handler_.isRunning()) {
       std::lock_guard<std::mutex> lock(cbMutex_);
       // The EBZ re-parses the identity from every telegram. Gate the log and
-      // the publish on a single change check so they fire once, together, and
-      // the gate keeps a single owner regardless of whether a callback is set.
+      // the publish on one change check so they fire once and together, and the
+      // gate keeps a single owner whether or not a callback is set.
       if (deviceGate_.changed(device_)) {
         logger_->debug("'{}' device: {}", cfg_.name, jsonDevice_.dump());
         if (deviceCallback_)
@@ -666,8 +692,10 @@ void EasyMeter::runLoop() {
     auto updateAction = handleResult(updateValuesAndJson());
     if (updateAction == MeterTypes::ErrorAction::SHUTDOWN)
       break;
-    else if (updateAction == MeterTypes::ErrorAction::RECONNECT)
+    else if (updateAction == MeterTypes::ErrorAction::RECONNECT) {
+      reconnectWait();
       continue;
+    }
 
     if (handler_.isRunning()) {
       std::lock_guard<std::mutex> lock(cbMutex_);

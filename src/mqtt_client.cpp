@@ -26,17 +26,28 @@ void requireReadable(const std::optional<std::string> &path, const char *what) {
 // the loop observes shutdown promptly and keepalive PINGs are sent on time.
 constexpr int loopTimeoutMs = 100;
 
+// Budget for the final write pass at shutdown (ms). A broker on the same host
+// drains in single-digit ms, so this is never spent on the normal path, and a
+// wedged one delays teardown by half a second -- well inside systemd's stop
+// timeout.
+constexpr int shutdownDrainTimeoutMs = 500;
+
+// Payloads for the bridge-level availability topic. Deliberately the same
+// vocabulary as the per-device topics so one consumer rule covers both levels.
+// The broker republishes the will verbatim, so the wording is ours to choose.
+constexpr const char *availabilityConnected = "connected";
+constexpr const char *availabilityDisconnected = "disconnected";
+
 // MQTT 3.1.1 CONNACK "server unavailable" - the one refusal the broker can
 // recover from on its own. mosquitto.h has no named constants for these codes.
 constexpr int connackServerUnavailable = 3;
 
-// Mirror mosquitto_loop_forever()'s own fatal/retryable split: it gives up (its
-// thread returns) on these codes, and on MOSQ_ERR_ERRNO when errno is EPROTO -
-// a protocol/TLS rejection that fails identically every retry, i.e. a
-// misconfiguration. Everything else (refused, lost, no-conn) is retried. `err`
-// must be the errno captured right after mosquitto_loop() returned. (A bad
-// password is not MOSQ_ERR_AUTH - that is the unused v5 AUTH-packet flow; it
-// arrives as a CONNACK refusal, handled in onConnect.)
+// Mirror mosquitto_loop_forever()'s own fatal/retryable split: it gives up on
+// these codes, and on MOSQ_ERR_ERRNO when errno is EPROTO - a protocol/TLS
+// rejection that fails identically every retry. Everything else (refused,
+// lost, no-conn) is retried. `err` must be the errno captured right after
+// mosquitto_loop() returned. A bad password does not arrive as MOSQ_ERR_AUTH
+// but as a CONNACK refusal, handled in onConnect.
 bool isFatalLoopError(int rc, int err) {
   switch (rc) {
   case MOSQ_ERR_NOMEM:
@@ -61,7 +72,8 @@ bool isFatalLoopError(int rc, int err) {
 } // namespace
 
 MqttClient::MqttClient(const MqttConfig &cfg, SignalHandler &signalHandler)
-    : cfg_(cfg), handler_(signalHandler) {
+    : cfg_(cfg), availabilityTopic_(cfg.topic + "/availability"),
+      handler_(signalHandler) {
 
   // Setup mqtt logger
   logger_ = spdlog::get("mqtt");
@@ -91,10 +103,10 @@ MqttClient::MqttClient(const MqttConfig &cfg, SignalHandler &signalHandler)
                               opt_c_str(cfg_.password));
   }
 
-  // Configure TLS if a tls block is present. All TLS options must be set on
-  // the handle before connecting. With a CA file/path the broker certificate
-  // is verified against it; with neither, fall back to the OS trust store so a
-  // broker using a public CA (e.g. Let's Encrypt) connects without local certs.
+  // All TLS options must be set on the handle before connecting. With a CA
+  // file/path the broker certificate is verified against it; with neither, fall
+  // back to the OS trust store so a broker using a public CA needs no local
+  // certificate.
   if (cfg_.tls.has_value()) {
     const auto &tls = *cfg_.tls;
     int rc = MOSQ_ERR_SUCCESS;
@@ -145,16 +157,32 @@ MqttClient::MqttClient(const MqttConfig &cfg, SignalHandler &signalHandler)
   // We drive mosquitto_loop() ourselves and publish from the worker thread.
   // Without loop_start libmosquitto runs single-threaded, so
   // mosquitto_publish() would write inline and race the loop on the same TLS
-  // connection (bad record mac); threaded_set defers writes to the loop thread,
-  // as loop_start did.
+  // connection (bad record mac); threaded_set defers writes to the loop thread.
   mosquitto_threaded_set(mosq_, true);
+
+  // The will must be set before connecting: the broker records it from the
+  // CONNECT packet. It fires only when the link dies without a DISCONNECT
+  // (SIGKILL, OOM kill, power loss); a graceful exit clears it, so
+  // ~MqttClient() publishes the disconnected state itself. QoS 1 and retained
+  // to match every other availability publish.
+  int rc = mosquitto_will_set(
+      mosq_, availabilityTopic_.c_str(),
+      static_cast<int>(std::strlen(availabilityDisconnected)),
+      availabilityDisconnected, 1, true);
+  if (rc != MOSQ_ERR_SUCCESS) {
+    mosquitto_destroy(mosq_);
+    mosq_ = nullptr;
+    mosquitto_lib_cleanup();
+    throw std::runtime_error(std::format("Failed to set MQTT will: {} ({})",
+                                         mosquitto_strerror(rc), rc));
+  }
 
   // Only initiate here; networkLoop() drives the handshake and all reconnects
   // (mosquitto_loop_start would quit on a TLS/protocol rejection).
-  // connect_async just validates and queues, so a failure now is a real setup
-  // error.
-  int rc =
-      mosquitto_connect_async(mosq_, opt_c_str(cfg_.broker), cfg_.port, 60);
+  // connect_async only validates and queues, so a failure now is a real setup
+  // error. The keepalive sets how long the broker waits before declaring us
+  // dead and firing the will: 1.5x, so 90 s.
+  rc = mosquitto_connect_async(mosq_, opt_c_str(cfg_.broker), cfg_.port, 60);
   if (rc != MOSQ_ERR_SUCCESS) {
     mosquitto_destroy(mosq_);
     mosq_ = nullptr;
@@ -170,11 +198,28 @@ MqttClient::MqttClient(const MqttConfig &cfg, SignalHandler &signalHandler)
 }
 
 MqttClient::~MqttClient() {
+  // mosquitto_disconnect() tells the broker to discard the will, so the
+  // graceful path has to say this itself. Queued before active_ is cleared so
+  // the worker's final flush pass carries it out with the masters' own
+  // availability publishes.
+  publish(availabilityDisconnected, availabilityTopic_);
+
+  // Cleared under the mutex the waiters hold: run() waits on cv_ without a
+  // timeout, so a notify that lands after a waiter has read active_ but before
+  // it has registered on the cv is lost for good, and the join below never
+  // returns.
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    active_.store(false);
+  }
   cv_.notify_all();
-  if (networkThread_.joinable())
-    networkThread_.join();
+
+  // Worker first: it produces the final payloads, the network thread writes
+  // them. Joining the network thread first would discard them.
   if (worker_.joinable())
     worker_.join();
+  if (networkThread_.joinable())
+    networkThread_.join();
 
   if (mosq_) {
     mosquitto_disconnect(mosq_);
@@ -235,7 +280,7 @@ void MqttClient::networkLoop() {
 
   std::chrono::seconds backoff{minDelay};
 
-  while (handler_.isRunning()) {
+  while (active_.load()) {
     const int rc = mosquitto_loop(mosq_, loopTimeoutMs, 1);
     const int err = errno;
 
@@ -244,7 +289,7 @@ void MqttClient::networkLoop() {
         backoff = minDelay; // reset once a connection is actually established
       continue;
     }
-    if (!handler_.isRunning())
+    if (!active_.load())
       break;
 
     if (isFatalLoopError(rc, err)) {
@@ -263,26 +308,50 @@ void MqttClient::networkLoop() {
       // Interruptible: the destructor's notify_all() wakes this on shutdown so
       // a long delay does not stall teardown.
       std::unique_lock<std::mutex> lock(mutex_);
-      cv_.wait_for(lock, backoff, [&] { return !handler_.isRunning(); });
+      cv_.wait_for(lock, backoff, [&] { return !active_.load(); });
     }
     backoff = exponential ? std::min(backoff * 2, maxDelay) : minDelay;
-    if (!handler_.isRunning())
+    if (!active_.load())
       break;
 
     mosquitto_reconnect_async(mosq_);
   }
+
+  drainOutgoing();
+}
+
+void MqttClient::drainOutgoing() {
+  // Publishes are QoS 1: mosquitto_publish() only queues them, the socket write
+  // happens here. Keep looping until the worker's final flush pass has returned
+  // and nothing is left to write. Bounded so a wedged broker cannot stall
+  // teardown, and noisy on expiry rather than silently dropping the masters'
+  // last availability payloads. This bounds the write, not the PUBACK --
+  // libmosquitto exposes no in-flight count.
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(shutdownDrainTimeoutMs);
+
+  while (connected_.load() &&
+         (!flushDone_.load() || mosquitto_want_write(mosq_))) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      logger_->warn("MQTT shutdown drain timed out after {} ms, messages "
+                    "still pending",
+                    shutdownDrainTimeoutMs);
+      return;
+    }
+    if (mosquitto_loop(mosq_, loopTimeoutMs, 1) != MOSQ_ERR_SUCCESS)
+      return;
+  }
 }
 
 void MqttClient::run() {
-  while (handler_.isRunning()) {
+  while (active_.load()) {
     std::unique_lock<std::mutex> lock(mutex_);
 
     cv_.wait(lock, [&] {
-      return (connected_.load() && hasQueuedMessages()) ||
-             !handler_.isRunning();
+      return (connected_.load() && hasQueuedMessages()) || !active_.load();
     });
 
-    if (!handler_.isRunning()) {
+    if (!active_.load()) {
       if (!connected_.load()) {
         break;
       }
@@ -314,6 +383,7 @@ void MqttClient::run() {
     }
   }
 
+  flushDone_.store(true);
   logger_->debug("MQTT run loop stopped.");
 }
 
@@ -349,6 +419,16 @@ void MqttClient::onConnect(struct mosquitto *mosq, void *obj, int rc) {
   } else {
     self->logger_->info("MQTT connected");
   }
+
+  // Re-announce on every connect, not just the first. If the will fired, the
+  // broker overwrote this topic with "disconnected" while lastPayloadHashes_
+  // still held "connected", so publish() would drop the re-announce as a
+  // duplicate. Forget the topic's history first.
+  {
+    std::lock_guard<std::mutex> lock(self->mutex_);
+    self->lastPayloadHashes_.erase(self->availabilityTopic_);
+  }
+  self->publish(availabilityConnected, self->availabilityTopic_);
 }
 
 void MqttClient::onDisconnect(struct mosquitto *mosq, void *obj, int rc) {

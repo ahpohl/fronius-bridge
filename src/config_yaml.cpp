@@ -20,11 +20,9 @@
 namespace {
 
 // Canonical list of serial baud rates the bridge supports, paired with the
-// termios speed_t each maps to. Single source of truth for both baudToSpeed()
-// (termios setup in the EasyMeter reader) and parseRtu() config
-// validation, so an unsupported rate is rejected at startup for every RTU
-// device rather than being passed straight to modbus_new_rtu() on the shared
-// libfronius bus, where libmodbus silently fails to apply it.
+// termios speed_t each maps to. Single source of truth for baudToSpeed() and
+// parseRtu() validation, so an unsupported rate is rejected at startup rather
+// than passed to modbus_new_rtu(), where libmodbus silently fails to apply it.
 struct BaudEntry {
   int baud;
   speed_t speed;
@@ -63,9 +61,8 @@ std::string supportedBaudList() {
 // Parse a positive count setting (e.g. a queue size) defaulting to `def`.
 // Parsed through a signed type so a negative value is rejected with a clear
 // error rather than wrapping to an enormous size_t: yaml-cpp's unsigned
-// conversion does not reject negatives, so reading straight into size_t would
-// let `queue_size: -1` slip past a `== 0` check. `field` names the setting
-// for the diagnostic.
+// conversion does not reject negatives, so `queue_size: -1` would otherwise
+// slip past a `== 0` check.
 std::size_t parsePositiveSize(const YAML::Node &node, const char *field,
                               long long def) {
   const long long value = node.as<long long>(def);
@@ -78,9 +75,8 @@ std::size_t parsePositiveSize(const YAML::Node &node, const char *field,
 } // namespace
 
 // Map a baud rate to its termios speed_t. The rate must already have been
-// accepted by parseRtu(), which validates every RTU device against
-// supportedBauds at config load, so a miss here is a programming error
-// rather than bad user input.
+// accepted by parseRtu(), so a miss here is a programming error rather than
+// bad user input.
 speed_t baudToSpeed(int baud) {
   if (auto speed = lookupBaud(baud))
     return *speed;
@@ -89,9 +85,8 @@ speed_t baudToSpeed(int baud) {
 }
 
 // Map a serial data-bit count to its termios character-size flag. The value
-// must already have been accepted by parseRtu() (every RTU device is validated
-// at config load), so a miss here is a programming error rather than bad user
-// input.
+// must already have been accepted by parseRtu(), so a miss here is a
+// programming error rather than bad user input.
 tcflag_t dataBitsToFlag(int dataBits) {
   switch (dataBits) {
   case 5:
@@ -135,10 +130,9 @@ void applyParity(termios &tty, Parity parity) {
   }
 }
 
-// Map a parity name to its enum, or std::nullopt for an unknown value.
-// Mirrors lookupBaud(): the conversion does not throw, the caller (parseRtu)
-// validates, so parity is checked in the same place as the other RTU
-// parameters.
+// Map a parity name to its enum, or std::nullopt for an unknown value. Mirrors
+// lookupBaud(): the conversion does not throw, parseRtu() validates, so parity
+// is checked in the same place as the other RTU parameters.
 static std::optional<Parity> parseParity(const std::string &val) {
   if (val == "none")
     return Parity::None;
@@ -260,19 +254,13 @@ static ResponseTimeoutConfig parseResponseTimeout(const YAML::Node &node) {
 // ---------------------------------------------------------------------------
 // Name parsing and validation
 //
-// Device names are used as MQTT topic segments (between the configured base
-// topic and the per-device suffixes such as `/values`, `/availability`).
-// They are no longer used as logger names — loggers are now fixed
-// class-based modules (`meter`, `meter.master`, `meter.slave`, `inverter`),
-// independent of how many devices are configured.
+// Device names are used as MQTT topic segments, between the configured base
+// topic and the per-device suffixes (`/values`, `/availability`, ...), so they
+// are restricted to a safe character set: no '+', '#' or '/' to break a topic,
+// nothing else to surprise downstream consumers.
 //
-// Restrict to a safe character set so names cannot break MQTT topics
-// (no '+', '#', '/') or surprise downstream consumers.
-//
-// `meter` and `inverter` are reserved because they would produce a topic
-// like `<base>/meter/meter/values` or `<base>/inverter/inverter/values`
-// which is parseable but visually confusing for anyone reading the topic
-// stream.
+// `meter` and `inverter` are reserved because they would produce topics like
+// `<base>/meter/meter/values`, parseable but confusing to read.
 //
 // Throws messages prefixed with `:` so the calling parser prepends its own
 // section label (`inverters[0]`, `meters[1]`, …) via the surrounding
@@ -280,9 +268,9 @@ static ResponseTimeoutConfig parseResponseTimeout(const YAML::Node &node) {
 // ---------------------------------------------------------------------------
 
 // A bare `name:` (or `name: ~` / `name: null`) parses as a YAML null, which
-// yaml-cpp converts to the string "null" rather than to an empty string or a
-// failed conversion; treat a missing or null node as empty so it is reported
-// as the unset field it is rather than a device literally named "null".
+// yaml-cpp converts to the string "null" rather than to an empty string; treat
+// a missing or null node as empty so it is reported as the unset field it is
+// rather than as a device literally named "null".
 static std::string parseName(const YAML::Node &node) {
   const auto n = node["name"];
   const std::string name = (n && !n.IsNull()) ? n.as<std::string>("") : "";
@@ -405,11 +393,10 @@ static GridConfig parseGrid(const YAML::Node &node) {
   return cfg;
 }
 
-// Parse the body of a `type: ebz` meter. The EasyMeter is read passively
-// over a dedicated serial line and is not a Modbus device, so it accepts only
-// `rtu` (required) and `grid` (optional). Modbus-only keys are rejected
-// rather than silently ignored, so a config that carries them under an EBZ
-// meter is caught as the mistake it is instead of behaving unexpectedly.
+// Parse the body of a `type: ebz` meter. The EasyMeter is read passively over a
+// dedicated serial line and is not a Modbus device, so it accepts only `rtu`
+// (required) and `grid` (optional). Modbus-only keys are rejected rather than
+// silently ignored, so the mistake is caught at load.
 static EasyMeterConfig parseEasyMeter(const YAML::Node &node) {
   EasyMeterConfig cfg;
 
@@ -420,7 +407,6 @@ static EasyMeterConfig parseEasyMeter(const YAML::Node &node) {
       {"update_interval",
        "the EasyMeter publishes on telegram arrival, not on an interval"},
       {"response_timeout", "the EasyMeter is not a Modbus device"},
-      {"reconnect_delay", "the EasyMeter manages its own serial reconnect"},
   };
   for (const auto &[key, why] : rejected)
     if (node[key])
@@ -433,6 +419,7 @@ static EasyMeterConfig parseEasyMeter(const YAML::Node &node) {
   cfg.rtu = std::move(*rtu);
 
   cfg.grid = parseGrid(node["grid"]);
+  cfg.reconnectDelay = parseReconnectDelay(node["reconnect_delay"]);
 
   return cfg;
 }
@@ -493,10 +480,8 @@ static std::vector<MeterConfig> parseMeters(const YAML::Node &node) {
       const auto type = node[i]["type"].as<std::string>("fronius");
       if (type == "fronius") {
         // Catch the easy mistake of writing an EBZ meter without `type: ebz`.
-        // The yaml parser would otherwise silently ignore the EBZ-only keys
-        // and treat the entry as a Fronius meter, which then fails at
-        // connect-time with a Modbus timeout rather than a clear config
-        // error.
+        // The entry would otherwise be treated as a Fronius meter and fail at
+        // connect time with a Modbus timeout rather than a config error.
         if (node[i]["grid"])
           throw std::runtime_error(
               ".grid is only valid for type: ebz (the EasyMeter); "
@@ -526,11 +511,10 @@ static std::vector<MeterConfig> parseMeters(const YAML::Node &node) {
   return result;
 }
 
-// The mqtt.tls section is optional: a missing section returns nullopt and the
-// broker connection stays plaintext. When present, an empty block ({}) is
-// valid and selects TLS with the OS trust store. A client certificate needs
-// both cert_file and key_file, plus a CA source (ca_file or ca_path), because
-// libmosquitto's mosquitto_tls_set() requires cafile or capath whenever a
+// Optional: a missing section returns nullopt and the broker connection stays
+// plaintext. An empty block ({}) is valid and selects TLS with the OS trust
+// store. A client certificate needs both cert_file and key_file plus a CA
+// source, because mosquitto_tls_set() requires cafile or capath whenever a
 // client certificate is supplied.
 static std::optional<MqttTlsConfig> parseMqttTls(const YAML::Node &node) {
   if (!node)
@@ -588,11 +572,10 @@ static MqttConfig parseMqtt(const YAML::Node &node) {
   return cfg;
 }
 
-// The postgres section is optional: a missing section returns nullopt and the
-// bridge runs MQTT-only. When present, `dsn` is mandatory (there is no usable
-// default for a connection string); queue_size and reconnect_delay mirror the
-// mqtt semantics. autoMigrate is intentionally not read here — it is a runtime
-// flag set from the CLI, not config.
+// Optional: a missing section returns nullopt and the bridge runs MQTT-only.
+// `dsn` is mandatory (there is no usable default for a connection string);
+// queue_size and reconnect_delay mirror the mqtt semantics. autoMigrate is
+// intentionally not read here — it is a CLI flag, not config.
 static std::optional<PostgresConfig> parsePostgres(const YAML::Node &node) {
   if (!node)
     return std::nullopt;
@@ -741,13 +724,10 @@ template <typename Cfg> ModbusBusConfig makeBusConfig(const Cfg &cfg) {
                              "rtu)");
   }
 
-  // busCfg.debug (the libmodbus wire trace) is intentionally left at its
-  // default of false here. Whether to enable it depends on the 'bus' logger
-  // being at trace level, but deriveBuses() runs inside loadConfig() — before
-  // setupLogging() has registered any logger — so spdlog::get("bus") would
-  // always return nullptr at this point. The decision is therefore deferred to
-  // main(), which sets the flag per bus once the module loggers exist (see the
-  // bus-construction loop after setupLogging).
+  // busCfg.debug (the libmodbus wire trace) is left at its default of false:
+  // enabling it depends on the 'bus' logger being at trace level, but this runs
+  // inside loadConfig(), before setupLogging() registers any logger. main()
+  // sets the flag per bus once the module loggers exist.
 
   busCfg.reconnectDelay = cfg.reconnectDelay.min;
   busCfg.reconnectDelayMax = cfg.reconnectDelay.max;
@@ -756,16 +736,11 @@ template <typename Cfg> ModbusBusConfig makeBusConfig(const Cfg &cfg) {
   return busCfg;
 }
 
-// Fold a device's reconnect-delay parameters into the bus-level aggregate.
-// On a shared bus we cannot honour each device's reconnect policy
-// individually — the bus has a single reconnect schedule — so we pick the
-// most-responsive interpretation:
-//   - min: smallest min across all devices (fastest first retry)
-//   - max: smallest max across all devices (cap backoff at the
-//          most-impatient device's tolerance)
-//   - exponential: true if any device wants exponential backoff
-//
-// If every device configures the same values, this aggregation is a no-op.
+// Fold a device's reconnect-delay parameters into the bus-level aggregate. A
+// shared bus has a single reconnect schedule, so the most-responsive
+// interpretation wins: smallest min (fastest first retry), smallest max (cap
+// backoff at the most impatient device's tolerance), exponential if any device
+// asks for it. A no-op when every device configures the same values.
 void mergeReconnectDelay(ModbusBusConfig &dst, const ModbusBusConfig &src) {
   dst.reconnectDelay = std::min(dst.reconnectDelay, src.reconnectDelay);
   dst.reconnectDelayMax =
@@ -775,10 +750,9 @@ void mergeReconnectDelay(ModbusBusConfig &dst, const ModbusBusConfig &src) {
 
 // What a meter contributes to the shared-bus registry: the bus it joins, the
 // config it opens, and the slave id it answers on. Dispatch is on the
-// meter-kind variant so the registry build stays kind-agnostic: Fronius
-// (Modbus) meters return a populated entry; the EBZ Easymeter owns a dedicated
-// serial line and never joins the shared bus, so it returns nullopt. The visit
-// is exhaustive, forcing an explicit decision for any future meter kind.
+// meter-kind variant so the registry build stays kind-agnostic; the EBZ
+// Easymeter owns a dedicated serial line and returns nullopt. The visit is
+// exhaustive, forcing an explicit decision for any future meter kind.
 struct MeterBusEntry {
   std::string key;
   ModbusBusConfig config;
@@ -836,11 +810,10 @@ std::string busSummaryLine(const std::string &key, const BusInfo &info) {
 
 // Synthesise the deduplicated bus registry from the inverter and meter
 // sections. Each unique transport (RTU device path or TCP host:port) becomes
-// one BusInfo; devices that share it are aggregated — reconnect-delay merged
-// to a single policy (see mergeReconnectDelay) and recorded as members. The
-// EBZ Easymeter contributes nothing (meterBusEntry returns nullopt). No
-// hardware is opened here. Call after validateConfig(), which guarantees that
-// devices sharing a bus already agree on line parameters.
+// one BusInfo, with the sharing devices recorded as members and their
+// reconnect-delay merged to a single policy. No hardware is opened here. Call
+// after validateConfig(), which guarantees that devices sharing a bus already
+// agree on line parameters.
 static std::map<std::string, BusInfo> deriveBuses(const AppConfig &cfg) {
   std::map<std::string, BusInfo> buses;
 
@@ -901,10 +874,9 @@ static void validateConfig(const AppConfig &cfg) {
   for (std::size_t i = 0; i < cfg.meters.size(); ++i) {
     const auto &c = cfg.meters[i];
     // Only Fronius (Modbus) meters are master-role devices on the bus. Other
-    // kinds (e.g. EBZ) do not join the shared bus and are excluded from the
-    // bus-level checks (busKey/slaveId uniqueness, RTU line-parameter
-    // consistency); they participate in the name-uniqueness and RTU device
-    // exclusivity checks below via their own collection.
+    // kinds are excluded from the bus-level checks (busKey/slaveId uniqueness,
+    // RTU line-parameter consistency) and instead take part in the name and
+    // device-exclusivity checks below via their own collection.
     const auto *f = asFronius(c);
     if (!f)
       continue;
@@ -915,10 +887,8 @@ static void validateConfig(const AppConfig &cfg) {
   // --- Collect the EBZ meter (non-bus, exclusive-serial reader) ---
   // The EasyMeter is neither a Modbus master nor a slave: it owns its serial
   // line exclusively and is read passively. EBZ meters are grid meters, of
-  // which an installation has exactly one, so at most one `type: ebz` meter is
-  // allowed (a second is rejected here). The single EBZ is kept out of the
-  // bus-level checks above but takes part in name uniqueness and the RTU
-  // device exclusivity check (its line must not be shared with anything).
+  // which an installation has exactly one, so a second `type: ebz` meter is
+  // rejected here.
   struct EbzRef {
     std::size_t index;
     std::string_view name;
@@ -938,9 +908,8 @@ static void validateConfig(const AppConfig &cfg) {
   }
 
   // --- Name uniqueness across all named devices ---
-  // Names are used as MQTT topic segments and as logger suffixes;
-  // collisions between inverter, meter (Fronius or EBZ) names would be
-  // ambiguous, so the scope is global rather than per-kind.
+  // Names are MQTT topic segments, so a collision between any two devices
+  // would be ambiguous; the scope is global rather than per-kind.
   {
     std::map<std::string, std::string> byName; // name -> owner description
     for (const auto &d : masters) {
@@ -1036,14 +1005,11 @@ static void validateConfig(const AppConfig &cfg) {
 
   // --- RTU device exclusivity across master, slave, and EBZ roles ---
   // Rules per /dev/tty* path:
-  //   - Multiple Modbus masters may share a path (that is the shared RTU
-  //     bus; line-parameter consistency is checked above).
+  //   - Multiple Modbus masters may share a path (the shared RTU bus).
   //   - A meter slave needs the path to itself: no master, no other slave.
-  //   - An EasyMeter needs the path to itself exclusively: no master,
-  //     no slave, no other EBZ. It locks the device (flock + TIOCEXCL) and
-  //     reads passively, so it cannot coexist with anything.
-  // A master+slave on one wire would deadlock the bridge against itself;
-  // two slaves, or anything sharing with an EBZ, is simply unworkable.
+  //   - An EasyMeter needs the path exclusively: it locks the device
+  //     (flock + TIOCEXCL) and reads passively, so it shares with nothing.
+  // A master+slave on one wire would deadlock the bridge against itself.
   {
     std::map<std::string, std::string> masterUsage; // device -> owner desc
     for (const auto &d : masters) {
@@ -1073,7 +1039,7 @@ static void validateConfig(const AppConfig &cfg) {
       }
     }
 
-    // EasyMeter: the serial line must be exclusive. Reject any overlap with
+    // EasyMeter: the serial line must be exclusive, so reject any overlap with
     // a Modbus master or a meter slave. At most one EasyMeter exists (enforced
     // above), so there is no EasyMeter-vs-EasyMeter case.
     if (ebzMeter) {
@@ -1104,9 +1070,8 @@ static void validateConfig(const AppConfig &cfg) {
 namespace {
 
 // Expands ${NAME} references in one scalar value. "$${" escapes to a literal
-// "${" for the rare value that must contain the sequence verbatim. An unset
-// variable or a malformed reference is a hard error naming the variable and
-// the config line: silently substituting an empty string (envsubst-style)
+// "${". An unset variable or a malformed reference is a hard error naming the
+// variable and the config line: substituting an empty string envsubst-style
 // would let a missing secret slip through as a wrong-but-valid config.
 std::string expandScalar(const std::string &in, const YAML::Mark &mark) {
   static const std::regex nameRe("[A-Za-z_][A-Za-z0-9_]*");
@@ -1136,10 +1101,9 @@ std::string expandScalar(const std::string &in, const YAML::Mark &mark) {
         throw std::runtime_error(
             std::format("config line {}: environment variable '{}' is not set",
                         mark.line + 1, name));
-      // A set-but-empty variable is almost always a blank .env entry; letting
-      // it through would surface later as an opaque runtime failure (broker
-      // auth, DSN parse). A genuinely empty value belongs in the YAML as a
-      // literal, not behind a reference.
+      // A set-but-empty variable is almost always a blank .env entry, and would
+      // surface later as an opaque runtime failure (broker auth, DSN parse). A
+      // genuinely empty value belongs in the YAML as a literal.
       if (*value == '\0')
         throw std::runtime_error(std::format(
             "config line {}: environment variable '{}' is set but empty",
@@ -1156,9 +1120,8 @@ std::string expandScalar(const std::string &in, const YAML::Mark &mark) {
 // Walks the parsed document and rewrites every scalar value containing a
 // ${NAME} reference. Runs on the YAML tree rather than the raw file text so
 // comments are never touched and every value position is covered uniformly,
-// numbers included (the scalar is rewritten before .as<T>() converts it).
-// Keys are left alone: a device name is an identity, not a deployment
-// parameter.
+// numbers included. Keys are left alone: a device name is an identity, not a
+// deployment parameter.
 void expandEnv(YAML::Node node) {
   if (node.IsScalar()) {
     const std::string &raw = node.Scalar();

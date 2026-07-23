@@ -25,9 +25,8 @@ bool resultOk(PGresult *res) noexcept {
 
 // Build a DbError from a failed exec. A dropped link wins unconditionally and
 // is reported as PROTOCOL, the worker's reconnect trigger; otherwise the
-// caller's errKind is paired with the server SQLSTATE so
-// DbError::deduceSeverity can classify it. The message is trimmed to its first
-// line to keep multi-line server context out of single-line log entries.
+// caller's errKind is paired with the server SQLSTATE so deduceSeverity can
+// classify it.
 DbError fromFailedResult(PGconn *conn, PGresult *res, DbError::Kind errKind) {
   if (PQstatus(conn) == CONNECTION_BAD)
     return DbError::make(DbError::Kind::PROTOCOL, "{}",
@@ -121,10 +120,9 @@ std::expected<Result, DbError> Conn::execParams(std::string_view sql,
                                                 const Params &params,
                                                 DbError::Kind errKind) {
   const std::string query{sql};
-  // nullptr paramTypes -> server infers each parameter's type from its use site
-  // (all our parameters land in typed INSERT columns or known function args);
-  // nullptr paramLengths/paramFormats -> text format throughout; final 0 ->
-  // text-format results.
+  // nullptr paramTypes -> the server infers each parameter's type from its use
+  // site; nullptr paramLengths/paramFormats -> text format throughout; the
+  // final 0 -> text-format results.
   Result res{PQexecParams(conn_, query.c_str(), params.count(), nullptr,
                           params.values(), nullptr, nullptr, 0)};
   if (!resultOk(res.get()))
@@ -146,10 +144,8 @@ std::expected<Transaction, DbError> Transaction::begin(Conn &conn,
 Transaction::~Transaction() {
   // Roll back iff the connection is still inside a transaction block. A
   // successful commit() leaves it idle and a dropped link leaves it unknown, so
-  // neither rolls back; an early return after a failed statement leaves it
-  // in-transaction (or in-error) and is unwound here. The status is the single
-  // source of truth, so no separate "committed" flag is needed. Best-effort:
-  // the result is ignored.
+  // neither rolls back; an early return after a failed statement is unwound
+  // here. Best-effort: the result is ignored.
   if (!conn_)
     return;
   const PGTransactionStatusType status = PQtransactionStatus(conn_->get());

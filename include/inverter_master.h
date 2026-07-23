@@ -36,10 +36,9 @@ public:
 
   std::expected<void, ModbusError> updateValuesAndJson(void);
   std::expected<bool, ModbusError> updateEventsAndJson(void);
-  // Returns true if the device identity was read on this call and differs
-  // from what was last emitted (so runLoop should publish it), false if the
-  // identity was already read and is unchanged. The inverter is read over
-  // Modbus, so identity is read once and skipped thereafter.
+  // Returns true when the identity was read on this call and differs from what
+  // was last emitted, so runLoop should publish it. Read over Modbus, so the
+  // identity is read once per connection and skipped thereafter.
   std::expected<bool, ModbusError> updateDeviceAndJson(void);
 
   void
@@ -65,10 +64,9 @@ private:
   const InverterConfig cfg_;
   std::shared_ptr<spdlog::logger> logger_;
 
-  // Bus-level callback IDs registered by this master. The destructor
-  // removes them before tearing down state captured by their lambdas
-  // (this, logger_, handler_), since the bus thread may outlive any
-  // individual master on a shared bus.
+  // Bus-level callback IDs registered by this master. The destructor removes
+  // them before tearing down the state their lambdas capture, since the bus
+  // thread may outlive any individual master on a shared bus.
   std::vector<FroniusBus::CallbackId> busCallbackIds_;
 
   // --- values and events ---
@@ -94,6 +92,12 @@ private:
   ChangeGate<InverterTypes::Events> eventsGate_;
   ChangeGate<InverterTypes::Device> deviceGate_;
   ChangeGate<std::string> availabilityGate_;
+
+  // Armed by the bus-connect callback, consumed by runLoop, which then clears
+  // deviceGate_ so the next poll re-reads the identity. The indirection keeps
+  // the gate single-threaded: libfronius fires the callback on the bus thread,
+  // not on the poll thread that owns the gate.
+  std::atomic<bool> deviceStale_{false};
 };
 
 #endif /* INVERTER_MASTER_H_ */

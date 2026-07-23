@@ -6,6 +6,7 @@
 #include "meter_master.h"
 #include "meter_types.h"
 #include "signal_handler.h"
+#include <chrono>
 #include <condition_variable>
 #include <expected>
 #include <fronius/fronius.h>
@@ -27,11 +28,9 @@
 //     and energy and per-phase currents are derived from the assumed grid
 //     parameters in EasyMeterConfig::grid.
 //
-// It reuses fronius::ModbusError for its error/severity model (telegram
-// framing errors map to EPROTO -> TRANSIENT, so the loop simply reconnects,
-// re-flushes the serial buffers via tryConnect()'s tcflush, and re-syncs the
-// telegram stream from scratch). Callback storage and cbMutex_ are inherited
-// from MeterMaster; this class fires the inherited callbacks from its worker.
+// It reuses fronius::ModbusError for its error/severity model: framing errors
+// map to EPROTO -> TRANSIENT, so the loop reconnects, re-flushes the serial
+// buffers via tryConnect()'s tcflush, and re-syncs the telegram stream.
 // ---------------------------------------------------------------------------
 
 class EasyMeter : public MeterMaster {
@@ -53,15 +52,17 @@ private:
   MeterTypes::ErrorAction
   handleResult(std::expected<void, ModbusError> &&result);
   void disconnect(void);
+  // Block for the given backoff period, or return early on shutdown. Pure
+  // wait: the caller grows the delay for the next attempt (see runLoop).
+  void sleepBackoff(std::chrono::seconds duration);
   std::expected<void, ModbusError> tryConnect(void);
   std::expected<void, ModbusError> readTelegram(void);
   std::expected<void, ModbusError> updateValuesAndJson(void);
   std::expected<void, ModbusError> updateDeviceAndJson(void);
 
-  // Held by value: AppConfig's std::vector<MeterConfig> may reallocate.
-  // cfg_ carries the kind-agnostic envelope (name, slave); ecfg_ is the
-  // EBZ-specific body (rtu line + grid assumptions) extracted from cfg_.body
-  // at construction.
+  // Held by value: AppConfig's std::vector<MeterConfig> may reallocate. cfg_
+  // is the kind-agnostic envelope (name, slave); ecfg_ is the EBZ-specific
+  // body (rtu line + grid assumptions) extracted from cfg_.body.
   const MeterConfig cfg_;
   const EasyMeterConfig ecfg_;
 
@@ -74,17 +75,15 @@ private:
   int serialPort_{-1};
 
   // --- threading ---
-  // The value/device/availability callbacks and the mutex guarding them
-  // (cbMutex_) live in the MeterMaster base; this master reads/fires them
-  // under that mutex from runLoop.
+  // The callbacks and the mutex guarding them (cbMutex_) live in the
+  // MeterMaster base; runLoop reads and fires them under that mutex.
   SignalHandler &handler_;
   std::condition_variable cv_;
   std::thread worker_;
 
   // The EBZ re-parses its identity from every SML telegram, so emit the device
-  // callback only when that identity actually changes (otherwise the device
-  // would be republished once per telegram). runLoop touches this only from
-  // the single poll thread.
+  // callback only when that identity changes; otherwise it would be
+  // republished once per telegram. Touched only from the poll thread.
   ChangeGate<MeterTypes::Device> deviceGate_;
 };
 

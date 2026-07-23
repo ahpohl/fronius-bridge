@@ -22,6 +22,15 @@ public:
     instance_ = this;
     sigaction(SIGINT, &action, nullptr);
     sigaction(SIGTERM, &action, nullptr);
+
+    // stdout is often a pipe, and Ctrl-C reaches the whole foreground process
+    // group, so the reader can die first. Fatal by default, which would kill
+    // us on the next log write, before any destructor -- devices would keep a
+    // retained "connected" on the broker.
+    struct sigaction ignore{};
+    ignore.sa_handler = SIG_IGN;
+    sigemptyset(&ignore.sa_mask);
+    sigaction(SIGPIPE, &ignore, nullptr);
   }
 
   ~SignalHandler() {
@@ -30,6 +39,10 @@ public:
     sigaction(SIGINT, &defaultAction, nullptr);
     sigaction(SIGTERM, &defaultAction, nullptr);
     instance_ = nullptr;
+
+    // SIGPIPE stays ignored. SIG_IGN holds no reference to this object, so
+    // unlike the handlers above it needs no undoing, and re-arming it would
+    // make a late spdlog flush fatal.
   }
 
   // --- Delete copy and assignment ---

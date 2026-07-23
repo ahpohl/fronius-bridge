@@ -15,22 +15,19 @@
 // ---------------------------------------------------------------------------
 // pg
 //
-// A thin RAII layer over libpq, sized to exactly what the PostgreSQL consumer
-// and the schema migrator need: an owning connection, an explicit-transaction
-// guard, an owning result, and a text-format parameter builder. It exists so
-// those two translation units can talk to libpq without hand-rolling PQclear /
-// PQfinish lifetimes or the const char* const* parameter marshalling, and so
-// the rest of the project keeps depending only on the stable C client library
-// rather than a C++-ABI-coupled wrapper.
+// A thin RAII layer over libpq, sized to what the PostgreSQL consumer and the
+// schema migrator need: an owning connection, an explicit-transaction guard,
+// an owning result, and a text-format parameter builder. It keeps PQclear /
+// PQfinish lifetimes and the const char* const* parameter marshalling out of
+// the callers, and keeps the project depending only on the stable C client
+// library rather than a C++-ABI-coupled wrapper.
 //
-// Error model: every fallible call returns std::expected<_, DbError>, matching
-// the rest of the bridge. The DbError is built inside the shim from the failed
-// result's SQLSTATE (PG_DIAG_SQLSTATE) and message, so callers just propagate
-// it. A dropped connection is detected here (PQstatus == CONNECTION_BAD) and
-// always classified DbError::Kind::PROTOCOL, regardless of the errKind the
-// caller asked for, so the worker's reconnect path fires on a dropped link. The
-// errKind argument only labels genuine query/migration failures; see
-// DbError::deduceSeverity for how (kind, sqlstate) maps to TRANSIENT vs FATAL.
+// Error model: every fallible call returns std::expected<_, DbError>, built
+// inside the shim from the failed result's SQLSTATE (PG_DIAG_SQLSTATE) and
+// message. A dropped connection (PQstatus == CONNECTION_BAD) is always
+// classified PROTOCOL regardless of the errKind the caller asked for, so the
+// worker's reconnect path fires on a dropped link; errKind only labels genuine
+// query/migration failures. See DbError::deduceSeverity for the classification.
 //
 // Threading: none of these types is synchronized. They are used solely on the
 // PostgresClient worker thread, which owns its connection.
@@ -76,9 +73,9 @@ public:
   const char *value(int row, int col) const noexcept {
     return PQgetvalue(res_, row, col);
   }
-  // Parse a cell as int. Used for the schema-version ledger, whose values are
-  // produced by COALESCE(MAX(version), 0) and are always well-formed integers;
-  // returns 0 on the impossible parse failure rather than throwing.
+  // Parse a cell as int. Used for the schema-version ledger, whose values come
+  // from COALESCE(MAX(version), 0) and are always well-formed; returns 0 on
+  // the impossible parse failure rather than throwing.
   int asInt(int row, int col) const noexcept;
 
   PGresult *get() const noexcept { return res_; }
@@ -102,9 +99,8 @@ private:
 // only by values(), after the builder is fully populated, so vector growth
 // during construction can never dangle them.
 //
-// Booleans render as "t"/"f"; non-finite floats render as the canonical
-// PostgreSQL spellings "NaN"/"Infinity"/"-Infinity"; finite floats use the
-// shortest round-trippable form. std::optional<T> binds *value or NULL.
+// Booleans render as "t"/"f"; non-finite floats as PostgreSQL's canonical
+// "NaN"/"Infinity"/"-Infinity"; std::optional<T> binds *value or NULL.
 // ---------------------------------------------------------------------------
 
 class Params {
@@ -181,17 +177,15 @@ private:
 //
 // Owning connection (PQfinish on destruction). Construction issues PQconnectdb
 // and never throws; the caller checks isOpen() and, on failure, reads
-// connectError() to obtain a CONNECT-kind DbError. Held by PostgresClient as a
-// std::unique_ptr<Conn> so the producing header can forward-declare it and stay
-// free of <libpq-fe.h>.
+// connectError(). Held by PostgresClient as a std::unique_ptr<Conn> so that
+// header can forward-declare it and stay free of <libpq-fe.h>.
 //
 // Statements run directly on the connection: exec() wraps PQexec (no
 // parameters, accepts a multi-statement body, e.g. a migration file) and
 // execParams() wraps PQexecParams (text-format parameters, single statement).
-// Both return the result or a DbError built from the server SQLSTATE; a dropped
-// link is reported as PROTOCOL. There is no transaction object in libpq: a
-// transaction is a BEGIN/COMMIT bracket on the connection, expressed by the
-// Transaction guard below, and execs issued while it is alive run inside it.
+// libpq has no transaction object: a transaction is a BEGIN/COMMIT bracket on
+// the connection, expressed by the Transaction guard below, and execs issued
+// while it is alive run inside it.
 // ---------------------------------------------------------------------------
 
 class Conn {
@@ -234,9 +228,9 @@ public:
              DbError::Kind errKind = DbError::Kind::QUERY);
 
   // Quote an SQL identifier (schema name) for safe interpolation into DDL, via
-  // PQescapeIdentifier. Returns the quoted identifier including the surrounding
-  // double quotes. An allocation failure yields an empty string, which surfaces
-  // downstream as a SQL syntax error rather than silent corruption.
+  // PQescapeIdentifier; the surrounding double quotes are included. An
+  // allocation failure yields an empty string, which surfaces downstream as a
+  // SQL syntax error rather than as silent corruption.
   std::string quoteName(std::string_view name) const;
 
   // Attach libpq's wire-level protocol trace to an already-open FILE*. No-op if
@@ -246,10 +240,9 @@ public:
       PQtrace(conn_, stream);
   }
 
-  // Install a libpq notice receiver (PQsetNoticeReceiver) so server
-  // NOTICE/WARNING messages can be routed through the application's logging
-  // rather than libpq's default sink (a raw write to stderr). Re-applied per
-  // connection: a fresh PGconn starts with the default receiver.
+  // Route server NOTICE/WARNING messages through the application's logging
+  // rather than libpq's default sink (a raw write to stderr). Must be
+  // re-applied per connection: a fresh PGconn starts with the default.
   void setNoticeReceiver(PQnoticeReceiver receiver, void *arg) noexcept {
     if (conn_)
       PQsetNoticeReceiver(conn_, receiver, arg);
@@ -270,22 +263,17 @@ private:
 // ---------------------------------------------------------------------------
 // Transaction
 //
-// Scope guard for an explicit transaction. begin() issues BEGIN on the
-// connection and returns the guard, or a DbError if even BEGIN fails (e.g. the
-// link is already down). It carries no exec of its own: statements run through
-// Conn::exec/execParams on the same connection and participate in the open
-// transaction. commit() issues COMMIT. On destruction the guard issues a
-// ROLLBACK iff the connection is still in a transaction block
-// (PQtransactionStatus reports PQTRANS_INTRANS or PQTRANS_INERROR), so an early
-// return on any statement error unwinds the partial transaction while a
-// successful commit() or a dropped link leaves nothing to roll back -- no
-// bookkeeping flag required.
+// Scope guard for an explicit transaction. begin() issues BEGIN and returns the
+// guard, or a DbError if even that fails. It carries no exec of its own:
+// statements run through Conn::exec/execParams on the same connection and
+// participate in the open transaction. On destruction the guard issues a
+// ROLLBACK iff the connection is still in a transaction block (PQTRANS_INTRANS
+// or PQTRANS_INERROR), so an early return on a statement error unwinds the
+// partial transaction while a successful commit() or a dropped link leaves
+// nothing to roll back -- no bookkeeping flag required.
 //
 // Wrap only genuinely multi-statement units; a lone statement is already atomic
-// under autocommit and needs no Transaction.
-//
-// Move-only and move-constructible (so begin() can return it by value); the
-// moved-from guard is inert.
+// under autocommit. Move-only; the moved-from guard is inert.
 // ---------------------------------------------------------------------------
 
 class Transaction {

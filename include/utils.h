@@ -13,16 +13,11 @@ inline double roundTo(double value, int decimals) {
 }
 
 // Scale a base SI unit to its kilo prefix: Wh -> kWh, VAh -> kVAh,
-// varh -> kvarh. Applied at every downstream sink (MQTT publish, and later
-// the PostgreSQL insert path).
-//
-// The bridge keeps Wh-family units in the in-memory Values structs because
-// that matches the SunSpec register semantics libfronius uses internally and
-// what its Modbus slave servers emit on the wire. Each meter/inverter master
-// fills its Values struct in Wh regardless of how its source reports energy
-// (the EBZ Easymeter reads kWh from its OBIS telegram and is scaled up at
-// parse time), so a single struct-wide convention holds and every consumer of
-// a Values struct scales identically at the boundary.
+// varh -> kvarh. Applied at every downstream sink (MQTT publish, PostgreSQL
+// insert). The in-memory Values structs keep Wh-family units because that
+// matches the SunSpec register semantics libfronius uses and what its Modbus
+// slave servers emit, so every master fills its struct in Wh regardless of how
+// its source reports energy and every consumer scales at the boundary.
 //
 // Divide by 1000.0 (exactly representable) rather than multiplying by 1e-3
 // (which is not): for the whole-Wh values Values::round() produces, the

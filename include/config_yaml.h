@@ -97,27 +97,22 @@ struct InverterConfig {
 // Meter config (one entry per physical meter)
 //
 // A meter entry has a kind-agnostic envelope (`MeterConfig`) carrying the
-// fields every meter shares — the device `name` and the optional SunSpec
-// `slave` block — plus a `body` variant holding the kind-specific transport
-// and protocol configuration.
-//
-// Two kinds are supported, selected by the YAML `type:` field (default
-// "fronius"):
+// fields every meter shares — the device `name`, the optional SunSpec `slave`
+// block and the site role — plus a `body` variant holding the kind-specific
+// transport and protocol configuration. The YAML `type:` field selects the
+// kind (default "fronius"):
 //
 //   - FroniusMeterConfig ("fronius"): a SunSpec meter reached over Modbus
-//     (TCP or RTU). Participates in the shared-bus registry and is polled on
-//     a fixed update interval.
+//     (TCP or RTU). Joins the shared-bus registry and is polled on a fixed
+//     update interval.
 //
 //   - EasyMeterConfig ("ebz"): an EBZ Easymeter read passively over a
-//     dedicated serial line (SML/OBIS telegrams). It does NOT use Modbus,
-//     does NOT join the shared bus, and is event-driven rather than polled.
-//     Populated in a later patch; empty for now so the variant type is
-//     complete.
+//     dedicated serial line (SML/OBIS telegrams). No Modbus, no shared bus,
+//     event-driven rather than polled.
 // ---------------------------------------------------------------------------
 
-// Fronius SunSpec meter reached over Modbus (TCP or RTU). These are exactly
-// the fields the former flat MeterConfig carried, minus the envelope fields
-// (`name`, `slave`) which now live on the wrapping MeterConfig.
+// Fronius SunSpec meter reached over Modbus (TCP or RTU). The envelope fields
+// (`name`, `slave`, site role) live on the wrapping MeterConfig.
 struct FroniusMeterConfig {
   std::optional<ModbusTcpClientConfig> tcp;
   std::optional<ModbusRtuConfig> rtu;
@@ -143,25 +138,24 @@ struct GridConfig {
 struct EasyMeterConfig {
   ModbusRtuConfig rtu;
   GridConfig grid;
+  ReconnectDelayConfig reconnectDelay;
 };
 
 // Where a meter sits in the installation, in Fronius terms. It determines what
-// the meter's energy means for the site-level calculations (a later feature):
-// a feed-in meter measures grid exchange (import and export), a consumption
-// meter measures a load. Meters with no location are monitored but left out of
-// the site energy balance.
+// the meter's energy means for the site-level calculations: a feed-in meter
+// measures grid exchange (import and export), a consumption meter measures a
+// load. Meters with no location are monitored but left out of the site energy
+// balance.
 enum class MeterLocation { FeedIn, Consumption };
 
-// Kind-agnostic envelope. The optional `slave` block, if present, makes this
-// meter's live values available on a SunSpec Modbus endpoint (typically used
-// to feed a Fronius inverter for export limiting); it is independent of the
-// meter kind in `body`.
+// Kind-agnostic envelope. The optional `slave` block makes this meter's live
+// values available on a SunSpec Modbus endpoint (typically to feed a Fronius
+// inverter for export limiting), independent of the kind in `body`.
 //
-// `location` and `primary` describe the meter's role for the site energy
-// calculations. `location` is unset for meters that are only monitored;
-// `primary` marks the single main reference meter (Fronius "primary meter")
-// and requires a location, since the primary's location selects how the site
-// figures are computed.
+// `location` is unset for meters that are only monitored; `primary` marks the
+// single main reference meter (Fronius "primary meter") and requires a
+// location, since the primary's location selects how the site figures are
+// computed.
 struct MeterConfig {
   std::string name;
   std::optional<MeterSlaveConfig> slave;
@@ -173,15 +167,13 @@ struct MeterConfig {
 // ---------------------------------------------------------------------------
 // MQTT TLS config
 //
-// Optional sub-block of the MQTT section. Present means the broker connection
-// is secured with TLS; absent means a plaintext connection. The broker
-// certificate is verified against `caFile`/`caPath` when either is given, or
-// against the OS trust store otherwise (so a broker using a public CA such as
-// Let's Encrypt needs no local certificate). `certFile`/`keyFile` add a client
-// certificate for mutual TLS and require a CA source, since libmosquitto's
-// mosquitto_tls_set() needs cafile or capath whenever a client certificate is
-// supplied. `insecure` disables broker hostname/certificate verification and
-// is intended for testing against self-signed certificates only.
+// Optional sub-block of the MQTT section; absent means a plaintext connection.
+// The broker certificate is verified against `caFile`/`caPath` when either is
+// given, otherwise against the OS trust store (so a broker using a public CA
+// needs no local certificate). `certFile`/`keyFile` add a client certificate
+// for mutual TLS and require a CA source, since mosquitto_tls_set() needs
+// cafile or capath whenever a client certificate is supplied. `insecure`
+// disables broker hostname/certificate verification (testing only).
 // ---------------------------------------------------------------------------
 
 struct MqttTlsConfig {
@@ -212,16 +204,13 @@ struct MqttConfig {
 // ---------------------------------------------------------------------------
 // PostgreSQL config
 //
-// Optional consumer, peer to MQTT. Present only when the `postgres:` section
-// exists in the YAML; absent (std::nullopt on AppConfig) means the bridge
-// runs MQTT-only and never opens a database connection. Each named device
-// gets its own schema (named after the device); there is no central device
-// registry, so this block carries only connection-level settings.
-//
-// `dsn` is a standard libpq connection string. `queueSize` bounds the
-// in-memory FIFO of pending writes (drop-oldest on overflow, as for MQTT).
-// `autoMigrate` is not parsed from YAML: it defaults to true and is cleared
-// by the CLI `--no-migrate` flag to run schema verification only.
+// Optional consumer, peer to MQTT. Absent (std::nullopt on AppConfig) means
+// the bridge runs MQTT-only and never opens a database connection. Each named
+// device gets its own schema, so this block carries only connection-level
+// settings. `dsn` is a standard libpq connection string; `queueSize` bounds
+// the in-memory FIFO of pending writes (drop-oldest on overflow, as for MQTT).
+// `autoMigrate` is not parsed from YAML: it defaults to true and is cleared by
+// the CLI `--no-migrate` flag to run schema verification only.
 // ---------------------------------------------------------------------------
 
 struct PostgresConfig {
@@ -247,10 +236,8 @@ struct LoggerConfig {
 // startup. Latitude drives the daylight length; longitude sets the solar
 // clock; horizon is the sun-centre altitude counted as sunrise/sunset
 // (-0.833 deg geometric default), a per-site calibration for how far outside
-// geometric daylight the inverter reports. The struct is optional in AppConfig
-// and absent when there is no `site:` section; a present section must supply
-// latitude and longitude. Site-level, not per-device: one bridge instance
-// serves one site.
+// geometric daylight the inverter reports. Optional, but a present section
+// must supply latitude and longitude. One bridge instance serves one site.
 // ---------------------------------------------------------------------------
 
 struct SiteConfig {
@@ -282,25 +269,21 @@ struct BusInfo {
 // Bus key (stable string identity) a device's transport maps to: RTU device
 // path, or TCP "host:port". Two devices with the same key share one bus. The
 // meter overload returns nullopt for non-bus kinds (the EBZ Easymeter, which
-// owns a dedicated serial line and never joins the shared bus). Used by main
-// to look a device up in the derived bus registry.
+// owns a dedicated serial line and never joins the shared bus).
 std::optional<std::string> busKeyOf(const MeterConfig &m);
 std::string busKeyOf(const InverterConfig &i);
 
-// Complete startup summary line for one bus. For a shared RTU bus, e.g.
-// "'heatpump' (id 2), and 'primo' (id 1) with RTU transport (8N1, 9600 baud)
-// assigned to '/dev/ttyUSB0'"; for a point-to-point TCP endpoint, e.g.
-// "'primo' (id 1) with TCP transport connecting to '192.168.6.51:502'". Device
-// names are quoted and joined with an Oxford comma. Total over both transports,
-// so the caller need not pre-filter.
+// Complete startup summary line for one bus, e.g. "'heatpump' (id 2), and
+// 'primo' (id 1) with RTU transport (8N1, 9600 baud) assigned to
+// '/dev/ttyUSB0'". Device names are quoted and joined with an Oxford comma.
+// Covers both transports, so the caller need not pre-filter.
 std::string busSummaryLine(const std::string &key, const BusInfo &info);
 
 // A derived per-device descriptor: one device's identity and site-energy role,
-// synthesised by loadConfig() from the inverter and meter sections. The bridge
-// writes the set verbatim into public.device_registry at startup so the
-// site-level SQL can resolve each device's role by name. `location` is the
-// canonical string ('feed-in'/'consumption') or nullopt; the consumer binds it
-// straight into SQL, so the enum is mapped to text here rather than there.
+// synthesised by loadConfig(). The bridge writes the set verbatim into
+// public.device_registry at startup so the site-level SQL can resolve each
+// device's role by name. The location enum is mapped to its canonical string
+// here rather than at the SQL binding site.
 struct DeviceRegistryEntry {
   std::string name;                    // device name == its schema name
   std::string kind;                    // "inverter" | "meter"
@@ -321,9 +304,8 @@ struct AppConfig {
   std::optional<SiteConfig> site;
 
   // Derived, not parsed: the deduplicated bus registry synthesised from
-  // `inverters` and `meters` by loadConfig() (there is no [buses] YAML
-  // section). Keyed by bus key (see busKeyOf). main builds one FroniusBus
-  // per entry.
+  // `inverters` and `meters` by loadConfig(), keyed by bus key (see
+  // busKeyOf). main builds one FroniusBus per entry.
   std::map<std::string, BusInfo> buses;
 
   // Derived, not parsed: one entry per configured device, in section order,

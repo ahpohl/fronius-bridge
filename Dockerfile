@@ -27,13 +27,15 @@ RUN git clone --branch "${CLI11_VERSION}" --depth 1 \
 # libfronius is not packaged for Alpine, so it is built from source here. The
 # tag is pinned rather than tracking master to keep image builds reproducible;
 # bump LIBFRONIUS_VERSION together with the bridge when the library API moves.
-ARG LIBFRONIUS_VERSION=v1.3.6
+ARG LIBFRONIUS_VERSION=v1.4.0
 RUN git clone --branch "${LIBFRONIUS_VERSION}" --depth 1 \
         https://github.com/ahpohl/libfronius.git /src/libfronius \
     && cmake -S /src/libfronius -B /src/libfronius/build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
     && cmake --build /src/libfronius/build \
-    && cmake --install /src/libfronius/build
+    && cmake --install /src/libfronius/build \
+    && DESTDIR=/stage cmake --install /src/libfronius/build \
+        --component runtime
 
 # The .git directory must be part of the build context: the version is derived
 # from git describe at configure time and falls back to 0.0.0 without it.
@@ -56,10 +58,12 @@ RUN apk add --no-cache \
 COPY --from=builder /out/usr/local/ /usr/local/
 
 # libfronius is linked dynamically, so the runtime stage needs the shared
-# object. Only the SONAME and the real file are copied; the .so devel symlink,
-# the static archive and the headers stay in the builder. musl searches
-# /usr/local/lib by default, so no ldconfig step is required.
-COPY --from=builder /usr/local/lib/libfronius.so.* /usr/local/lib/
+# object. The builder staged the library's own runtime component -- the same
+# set that goes into the libfronius1 deb, currently just the SONAME and the
+# real file -- so the install prefix and libdir are not repeated here and a
+# layout change in libfronius needs no edit. musl searches /usr/local/lib by
+# default, so no ldconfig step is required.
+COPY --from=builder /stage/ /
 
 # Non-root; dialout matches the usual host group of USB serial adapters. If
 # the host uses a different gid, override with group_add in the compose file.

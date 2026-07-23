@@ -11,19 +11,16 @@
 // and the arrays live in migrations.cpp; this header exposes only spans so
 // callers do not pay the compile-time cost of the #embed directives.
 //
-// Each device kind has its own independently-numbered registry. SchemaMigrator
-// applies the matching one into each device's schema:
+// Each track is independently numbered. SchemaMigrator applies the two device
+// tracks into each device's own schema, and the public track once per database
+// into the pre-existing public schema (device registry, site-level objects):
 //   inverter -> inverterMigrations  (db/inverter/NNN_*.sql)
 //   meter    -> meterMigrations     (db/meter/NNN_*.sql)
-//
-// The public track is applied once per database into the pre-existing public
-// schema, for site-level objects shared across devices (the device registry,
-// and later the site-energy table):
 //   public   -> publicMigrations    (db/public/NNN_*.sql)
 //
-// To add a migration for a track:
-//   1. Drop NNN_<name>.sql into db/<track>/ (NNN consecutive within the track)
-//   2. Append a Migration entry to the track's array in migrations.cpp
+// To add a migration: drop NNN_<name>.sql into db/<track>/ (NNN consecutive
+// within the track) and append a Migration entry to that track's array in
+// migrations.cpp.
 // ---------------------------------------------------------------------------
 
 extern const std::span<const Migration> inverterMigrations;

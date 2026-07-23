@@ -51,9 +51,8 @@ struct MeterTypes {
     Phase phase3;
 
     // Quantise to the output precision before the values reach any consumer.
-    // Energies are in Wh and rounded to whole Wh (0 dp), which becomes 3 dp
-    // once scaled to kWh; voltage 1 dp, current 3 dp, power / power factor /
-    // frequency 2 dp.
+    // Energies are Wh rounded to whole Wh (0 dp -> 3 dp in kWh); voltage 1 dp,
+    // current 3 dp, power / power factor / frequency 2 dp.
     void round() {
       activeEnergyImport = Utils::roundTo(activeEnergyImport, 0);
       activeEnergyExport = Utils::roundTo(activeEnergyExport, 0);

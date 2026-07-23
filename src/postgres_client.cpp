@@ -47,12 +47,10 @@ std::string timeFromMillis(uint64_t ms) {
 
 // libpq notice receiver: route server NOTICE/WARNING messages through the
 // postgres logger instead of libpq's default sink (a raw write to stderr that
-// bypasses spdlog and interleaves with it). Severity-aware via the
-// non-localized severity field, so the routing is locale-independent: WARNING
-// -> warn, everything quieter (NOTICE/INFO/LOG/DEBUG) -> debug. Routine setup
-// chatter (CREATE ... IF NOT EXISTS, TimescaleDB's compress_orderby defaulting)
-// therefore stays out of the default info output but stays visible at debug.
-// arg is the postgres logger, which outlives the connection.
+// bypasses spdlog and interleaves with it). Keyed on the non-localized severity
+// field so the routing is locale-independent: WARNING -> warn, everything
+// quieter -> debug, which keeps routine setup chatter out of the default info
+// output. arg is the postgres logger, which outlives the connection.
 void routeNotice(void *arg, const PGresult *res) {
   auto *logger = static_cast<spdlog::logger *>(arg);
   if (!logger || !res)
@@ -98,9 +96,15 @@ PostgresClient::PostgresClient(const PostgresConfig &cfg,
 }
 
 PostgresClient::~PostgresClient() {
-  // main() will already have called handler_.shutdown() in the normal case;
-  // wake the queue cv as a belt-and-braces measure. std::jthread joins on
-  // destruction. conn_ is complete here, so its unique_ptr destroys cleanly.
+  // Destruction, not the shutdown signal, retires the worker: main destroys
+  // every master first, and their destructors emit a final "disconnected" that
+  // has to reach the database. Clearing the flag under the queue mutex closes
+  // the window where the worker evaluates a wait predicate and sleeps just
+  // after we notify.
+  {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    active_.store(false);
+  }
   queueCv_.notify_all();
   postgresLogger_->debug("PostgresClient shut down");
 }
@@ -131,6 +135,19 @@ void PostgresClient::onMeter(std::string deviceName,
                              MeterTypes::Values values) {
   enqueue(
       Event{.deviceName = std::move(deviceName), .payload = std::move(values)});
+}
+
+void PostgresClient::onAvailability(std::string deviceName, bool online) {
+  // Stamped on the producer thread, the same way the masters stamp
+  // Values::time, so the recorded instant is when the device was seen to change
+  // state and not when the worker got to it.
+  const auto now = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+
+  enqueue(Event{.deviceName = std::move(deviceName),
+                .payload = Availability{.online = online, .time = now}});
 }
 
 void PostgresClient::enqueue(Event ev) {
@@ -175,7 +192,12 @@ void PostgresClient::run() {
 
   std::chrono::seconds backoff{minDelay};
 
-  while (handler_.isRunning()) {
+  // Set when a FATAL error has already escalated to handler_.shutdown(): the
+  // outer loop keys on active_, which only the destructor clears, so it needs
+  // its own reason to stop reconnecting.
+  bool fatal = false;
+
+  while (active_.load()) {
 
     // --- Connect, check extensions, replay cached device upserts. ---
     auto setup = connectAndPrepare();
@@ -187,6 +209,7 @@ void PostgresClient::run() {
         // the operator gets a non-zero exit and a chance to fix the cause.
         postgresLogger_->error("Postgres setup failed: {}", err.describe());
         handler_.shutdown(true, "Postgres setup failed");
+        fatal = true;
         break;
       }
       postgresLogger_->warn("Postgres setup failed: {} - retrying in {}s",
@@ -199,14 +222,17 @@ void PostgresClient::run() {
     backoff = minDelay;
     postgresLogger_->info("Postgres connected");
 
-    // --- Drain queue until shutdown or a connection-level failure. ---
-    while (handler_.isRunning()) {
+    // --- Drain the queue until the destructor asks us to stop, or until a
+    //     connection-level failure. The head deliberately does not test
+    //     active_ on its own: the break below needs the queue empty too, so a
+    //     stop drains the backlog instead of discarding it. This terminates
+    //     because every producer is destroyed before we are. ---
+    while (true) {
       Event ev;
       {
         std::unique_lock<std::mutex> lock(queueMutex_);
-        queueCv_.wait(lock,
-                      [&] { return !queue_.empty() || !handler_.isRunning(); });
-        if (!handler_.isRunning() && queue_.empty())
+        queueCv_.wait(lock, [&] { return !queue_.empty() || !active_.load(); });
+        if (!active_.load() && queue_.empty())
           break;
         ev = std::move(queue_.front());
         queue_.pop();
@@ -219,6 +245,7 @@ void PostgresClient::run() {
         if (err.severity == DbError::Severity::FATAL) {
           postgresLogger_->error("Postgres event failed: {}", err.describe());
           handler_.shutdown(true, "Postgres write failed");
+          fatal = true;
           break;
         }
 
@@ -229,6 +256,13 @@ void PostgresClient::run() {
           break;
         }
 
+        // An IDENTITY rejection quarantines its own device and leaves the
+        // rest writing. The upsert already logged it once, with the device
+        // named and without repeating on every later event, so saying so a
+        // second time here adds nothing.
+        if (err.kind == DbError::Kind::IDENTITY)
+          continue;
+
         // TRANSIENT QUERY: warn and continue; the event is lost. Includes a
         // duplicate-timestamp unique violation (a benign re-poll) and a
         // constraint violation (a data/schema mismatch worth noticing but not
@@ -236,6 +270,20 @@ void PostgresClient::run() {
         postgresLogger_->warn("Postgres event failed: {}", err.describe());
       }
     }
+
+    if (fatal)
+      break;
+  }
+
+  // Reaching here with a non-empty queue means the events could not be
+  // written: Postgres was down at shutdown, or the connection broke during the
+  // final drain. Say how many were lost rather than dropping them silently.
+  {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    if (!queue_.empty())
+      postgresLogger_->warn("Postgres worker stopping with {} undelivered "
+                            "events; they are discarded",
+                            queue_.size());
   }
 
   postgresLogger_->debug("Postgres worker thread stopping");
@@ -246,7 +294,7 @@ void PostgresClient::run() {
 
 void PostgresClient::sleepBackoff(std::chrono::seconds duration) {
   std::unique_lock<std::mutex> lock(queueMutex_);
-  queueCv_.wait_for(lock, duration, [&] { return !handler_.isRunning(); });
+  queueCv_.wait_for(lock, duration, [&] { return !active_.load(); });
 }
 
 void PostgresClient::attachSqlTrace() {
@@ -285,10 +333,9 @@ void PostgresClient::attachSqlTrace() {
 }
 
 std::expected<void, DbError> PostgresClient::connectAndPrepare() {
-  // --- Open or reopen the connection. PQconnectdb does not throw; a failed
-  //     connection is reported via isOpen()/connectError() rather than an
-  //     exception, so there is no catch ladder here. On failure the dead handle
-  //     is released before returning so it is not held during the backoff. ---
+  // --- Open or reopen the connection. PQconnectdb does not throw: failure is
+  //     reported via isOpen()/connectError(). The dead handle is released
+  //     before returning so it is not held across the backoff. ---
   conn_ = std::make_unique<pg::Conn>(cfg_.dsn);
   if (!conn_->isOpen()) {
     DbError err = conn_->connectError();
@@ -296,26 +343,24 @@ std::expected<void, DbError> PostgresClient::connectAndPrepare() {
     return std::unexpected(err);
   }
 
-  // --- Route server NOTICE/WARNING messages through our logger instead of
-  //     libpq's default stderr sink. Installed here so it covers the migrations
-  //     that follow; re-installed on every reconnect, as each new PGconn starts
-  //     with the default receiver. ---
+  // --- Route server NOTICE/WARNING messages through our logger. Installed
+  //     here so it covers the migrations that follow, and re-installed on
+  //     every reconnect since each new PGconn starts with the default. ---
   conn_->setNoticeReceiver(&routeNotice, postgresLogger_.get());
 
   // --- Hook libpq's wire-level SQL trace if requested by log level. ---
   if (postgresLogger_->should_log(spdlog::level::trace))
     attachSqlTrace();
 
-  // --- Verify the required extensions exist (once per process). The check is
-  //     database-global, so it need not repeat on every reconnect; a missing
-  //     extension is FATAL and bubbles up to shut the bridge down. ---
+  // --- Verify the required extensions exist (once per process; the check is
+  //     database-global). A missing extension is FATAL and shuts down. ---
   if (!extensionsChecked_) {
     SchemaMigrator m{*conn_};
     if (auto r = m.checkExtensions(); !r)
       return r;
-    // Bring the shared public schema (device registry, and later the
-    // site-energy objects) up to date once per process, the same lifecycle as
-    // the extension check. Honors --no-migrate like the per-device path.
+    // Bring the shared public schema (device registry, site-energy objects)
+    // up to date once per process, the same lifecycle as the extension check.
+    // Honors --no-migrate like the per-device path.
     auto pub = cfg_.autoMigrate ? m.migrate(publicMigrations, "public")
                                 : m.verify(publicMigrations, "public");
     if (!pub)
@@ -329,20 +374,30 @@ std::expected<void, DbError> PostgresClient::connectAndPrepare() {
   }
 
   // --- Replay device upserts from the cache. On a reconnect the schemas
-  //     already exist (migrate ran on first sight and is not repeated here),
-  //     so this just refreshes each device row and last_seen. The cached SQL
-  //     is connection-independent, so nothing needs re-preparing. On first
-  //     connect the caches are empty and the device callbacks populate them
-  //     via the normal lazy-migrate path.
+  //     already exist, so this just refreshes each device row and last_seen;
+  //     the cached SQL is connection-independent and needs no re-preparing. On
+  //     first connect the caches are empty and the device callbacks populate
+  //     them via the normal lazy-migrate path. `device` is copied out before
+  //     the call so the upsert does not read the entry it rewrites.
   //
-  //     Copy `device` out before the call so the upsert does not read from the
-  //     same cache entry it rewrites. ---
+  //     Quarantined devices are skipped: `device` holds the last *accepted*
+  //     identity, so replaying it would pass the check and lift the quarantine
+  //     while the wrong hardware is still connected.
+  //
+  //     Offline devices are skipped because the upsert stamps last_seen, which
+  //     would claim we heard from a device that has not answered since it
+  //     dropped. A reconnecting master's device re-read restores the row
+  //     through the normal path. ---
   for (const auto &[name, cached] : cachedInverters_) {
+    if (cached.identityRejected || isKnownOffline(name))
+      continue;
     auto device = cached.device;
     if (auto r = upsertInverterDevice(name, device); !r)
       return r;
   }
   for (const auto &[name, cached] : cachedMeters_) {
+    if (cached.identityRejected || isKnownOffline(name))
+      continue;
     auto device = cached.device;
     if (auto r = upsertMeterDevice(name, device); !r)
       return r;
@@ -363,6 +418,8 @@ std::expected<void, DbError> PostgresClient::processEvent(const Event &ev) {
           return insertInverterValues(ev.deviceName, payload);
         } else if constexpr (std::is_same_v<T, MeterTypes::Values>) {
           return insertMeterValues(ev.deviceName, payload);
+        } else if constexpr (std::is_same_v<T, Availability>) {
+          return updateAvailability(ev.deviceName, payload);
         }
       },
       ev.payload);
@@ -373,12 +430,11 @@ std::expected<void, DbError> PostgresClient::syncRegistry() {
   if (!tx)
     return std::unexpected(tx.error());
 
-  // now() is transaction_timestamp(): one value for the whole transaction.
-  // Every row upserted below stamps updated_at with it, so the reconciling
-  // DELETE then removes exactly the rows left untouched this run -- the
-  // devices no longer in the configuration -- whose updated_at is strictly
-  // older. This avoids binding the name list as an array just to delete the
-  // complement.
+  // now() is transaction_timestamp(): one value for the whole transaction, so
+  // every row upserted below shares an updated_at and the reconciling DELETE
+  // removes exactly the strictly-older rows left untouched this run -- the
+  // devices no longer configured. Avoids binding the name list as an array
+  // just to delete its complement.
   for (const auto &e : registry_) {
     if (auto r = conn_->execParams(
             "INSERT INTO public.device_registry "
@@ -399,11 +455,9 @@ std::expected<void, DbError> PostgresClient::syncRegistry() {
       !r)
     return std::unexpected(r.error());
 
-  // Single-row site location (latitude/longitude, NULL when not configured).
-  // Blind upsert: the boolean PK pinned to TRUE means there is only ever one
-  // row. Written every run so removing the `site:` section clears it. The three
-  // columns are NULL together when there is no section; a present one always
-  // sets latitude and longitude (the config requires them).
+  // Single-row site location (NULL when not configured). Blind upsert: the
+  // boolean PK pinned to TRUE means there is only ever one row. Written every
+  // run so removing the `site:` section clears it.
   const std::optional<double> lat =
       site_ ? std::optional<double>{site_->latitude} : std::nullopt;
   const std::optional<double> lon =
@@ -464,6 +518,7 @@ PostgresClient::upsertInverterDevice(const std::string &name,
         "hybrid=EXCLUDED.hybrid, mppt_tracker=EXCLUDED.mppt_tracker, "
         "phases=EXCLUDED.phases, power_rating=EXCLUDED.power_rating, "
         "last_seen=now()";
+    ci.touchSql = "UPDATE " + s + ".device SET last_seen=$1";
     ci.valuesSql =
         "INSERT INTO " + s +
         ".samples (time, ac_energy, ac_power_active, ac_power_apparent, "
@@ -476,6 +531,24 @@ PostgresClient::upsertInverterDevice(const std::string &name,
                   ".input_samples (time, input_id, dc_voltage, dc_current, "
                   "dc_power, dc_energy) VALUES ($1,$2,$3,$4,$5,$6)";
     it = cachedInverters_.emplace(name, std::move(ci)).first;
+  }
+
+  // After the migration (the table must exist) and before the upsert (which
+  // would otherwise refresh last_seen on a row this device does not own).
+  if (auto ok = checkDeviceIdentity(name, dev.serialNumber); !ok) {
+    // Log on entry only; see upsertMeterDevice for the rationale.
+    if (!it->second.identityRejected) {
+      postgresLogger_->warn("Quarantining inverter '{}': {}", name,
+                            ok.error().message);
+      it->second.identityRejected = true;
+    }
+    return std::unexpected(ok.error());
+  }
+
+  if (it->second.identityRejected) {
+    postgresLogger_->info(
+        "Inverter '{}' identity accepted again, resuming writes", name);
+    it->second.identityRejected = false;
   }
 
   // A single ON CONFLICT upsert is atomic on its own, so it runs in autocommit
@@ -498,6 +571,45 @@ PostgresClient::upsertInverterDevice(const std::string &name,
   postgresLogger_->debug("Upserted inverter '{}' (serial '{}')", name,
                          dev.serialNumber);
   return {};
+}
+
+std::expected<void, DbError>
+PostgresClient::checkDeviceIdentity(const std::string &name,
+                                    const std::string &serial) {
+  // A serial we cannot trust is worse than no serial: it would be written as
+  // the baseline and every later comparison would agree with it. A transport
+  // error already fails loudly upstream, so a degenerate value here means the
+  // device answered with a valid frame and bad content.
+  if (serial.empty() || serial == "0")
+    return std::unexpected(DbError::make(
+        DbError::Kind::IDENTITY, "unusable serial number '{}'", serial));
+
+  auto res = conn_->execParams("SELECT serial_number FROM " +
+                                   conn_->quoteName(name) + ".device",
+                               pg::Params{});
+  if (!res)
+    return std::unexpected(res.error());
+
+  // No row yet: first run against this schema. The upsert that follows writes
+  // the baseline every later run is compared against.
+  if (res->empty())
+    return {};
+
+  // More than one row means the singleton index is missing or was dropped by
+  // hand. Refuse rather than pick one to compare against.
+  if (res->rows() > 1)
+    return std::unexpected(DbError::make(
+        DbError::Kind::IDENTITY, "schema holds {} device rows, expected one",
+        res->rows()));
+
+  const std::string stored = res->value(0, 0);
+  if (stored == serial)
+    return {};
+
+  return std::unexpected(
+      DbError::make(DbError::Kind::IDENTITY,
+                    "schema belongs to serial '{}' but the device reports '{}'",
+                    stored, serial));
 }
 
 std::expected<void, DbError>
@@ -527,6 +639,7 @@ PostgresClient::upsertMeterDevice(const std::string &name,
         "firmware_version=EXCLUDED.firmware_version, "
         "register_model=EXCLUDED.register_model, meter_id=EXCLUDED.meter_id, "
         "slave_id=EXCLUDED.slave_id, phases=EXCLUDED.phases, last_seen=now()";
+    cm.touchSql = "UPDATE " + s + ".device SET last_seen=$1";
     cm.valuesSql =
         "INSERT INTO " + s +
         ".samples (time, energy_active_import, energy_active_export, "
@@ -543,9 +656,28 @@ PostgresClient::upsertMeterDevice(const std::string &name,
     it = cachedMeters_.emplace(name, std::move(cm)).first;
   }
 
-  // A non-SunSpec meter (e.g. EBZ Easymeter over SML) leaves the SunSpec /
-  // Modbus identity fields unset; store NULL rather than empty/zero so the
-  // schema's value checks only see real values.
+  // After the migration (the table must exist) and before the upsert (which
+  // would otherwise refresh last_seen on a row this device does not own).
+  if (auto ok = checkDeviceIdentity(name, dev.serialNumber); !ok) {
+    // Log on entry only: the sample drops that follow repeat at the poll rate,
+    // and one actionable line beats thousands the operator has to filter.
+    if (!it->second.identityRejected) {
+      postgresLogger_->warn("Quarantining meter '{}': {}", name,
+                            ok.error().message);
+      it->second.identityRejected = true;
+    }
+    return std::unexpected(ok.error());
+  }
+
+  if (it->second.identityRejected) {
+    postgresLogger_->info("Meter '{}' identity accepted again, resuming writes",
+                          name);
+    it->second.identityRejected = false;
+  }
+
+  // A non-SunSpec meter (e.g. the EBZ over SML) leaves the SunSpec/Modbus
+  // identity fields unset; store NULL rather than empty/zero so the schema's
+  // value checks only see real values.
   const std::optional<std::string> registerModel =
       dev.registerModel.empty() ? std::nullopt
                                 : std::optional<std::string>{dev.registerModel};
@@ -574,6 +706,58 @@ PostgresClient::upsertMeterDevice(const std::string &name,
 }
 
 std::expected<void, DbError>
+PostgresClient::updateAvailability(const std::string &name,
+                                   const Availability &av) {
+  // Advance the state first: the edge is what matters, and it must be consumed
+  // even when the stamp below is skipped, or a "disconnected" that slipped past
+  // the master's gate would stamp again with a later time.
+  const bool wasOnline = std::exchange(deviceOnline_[name], av.online);
+  if (av.online || !wasOnline)
+    return {};
+
+  if (!conn_)
+    return std::unexpected(DbError::make(
+        DbError::Kind::INTERNAL, "updateAvailability without a connection"));
+
+  // Only a device that reached an accepted upsert this run has a row to stamp:
+  // no cache entry means no schema yet, and a quarantined entry belongs to
+  // other hardware whose last_seen is not ours to move.
+  const std::string *touchSql = nullptr;
+  if (auto it = cachedInverters_.find(name);
+      it != cachedInverters_.end() && !it->second.identityRejected)
+    touchSql = &it->second.touchSql;
+  else if (auto mt = cachedMeters_.find(name);
+           mt != cachedMeters_.end() && !mt->second.identityRejected)
+    touchSql = &mt->second.touchSql;
+
+  if (!touchSql)
+    return {};
+
+  // Unqualified UPDATE: device_singleton_idx holds every per-device table to
+  // at most one row, so there is nothing to select between. A missing row
+  // updates nothing, the right outcome for a device that disconnected before
+  // its first upsert landed.
+  //
+  // The bound instant is the producer's, not the server's now(): that keeps the
+  // column honest across a database outage and puts device.last_seen on the
+  // same clock as samples.time.
+  const auto ts = timeFromMillis(av.time);
+  if (auto r = conn_->execParams(*touchSql, pg::Params{ts}); !r)
+    return std::unexpected(r.error());
+
+  postgresLogger_->debug("Stamped last_seen for '{}' on disconnect", name);
+  return {};
+}
+
+bool PostgresClient::isKnownOffline(const std::string &name) const {
+  // find() rather than operator[]: an absent entry means no transition has been
+  // processed yet, which is not the same as offline. Answering true would hold
+  // last_seen back for a device that is in fact up.
+  auto it = deviceOnline_.find(name);
+  return it != deviceOnline_.end() && !it->second;
+}
+
+std::expected<void, DbError>
 PostgresClient::insertInverterValues(const std::string &name,
                                      const InverterTypes::Values &v) {
   if (!conn_)
@@ -582,9 +766,8 @@ PostgresClient::insertInverterValues(const std::string &name,
 
   const auto it = cachedInverters_.find(name);
   if (it == cachedInverters_.end()) {
-    // Values can briefly precede the device upsert at startup (e.g. on a shared
-    // bus where each device is polled in turn). Without the cache we have
-    // neither the schema SQL nor the cardinality flags, so drop the event.
+    // Values can briefly precede the device upsert at startup. Without the
+    // cache there is neither schema SQL nor cardinality flags, so drop it.
     return std::unexpected(DbError::make(
         DbError::Kind::QUERY,
         "inverter '{}' values arrived before its device upsert, dropping",
@@ -592,6 +775,14 @@ PostgresClient::insertInverterValues(const std::string &name,
   }
 
   const auto &cache = it->second;
+
+  // See insertMeterValues: a quarantined schema takes no samples.
+  if (cache.identityRejected) {
+    postgresLogger_->debug("Inverter '{}' is quarantined, dropping sample",
+                           name);
+    return {};
+  }
+
   const auto ts = timeFromMillis(v.time);
   const bool isHybrid = cache.isHybrid;
   const int phases = std::clamp(cache.phases, 1, 3);
@@ -666,6 +857,16 @@ PostgresClient::insertMeterValues(const std::string &name,
   }
 
   const auto &cache = it->second;
+
+  // The schema belongs to other hardware: writing these samples would append
+  // one device's readings to another's counter series, the damage the identity
+  // check exists to prevent. Already reported when the quarantine was entered,
+  // so drop quietly rather than logging at the poll rate.
+  if (cache.identityRejected) {
+    postgresLogger_->debug("Meter '{}' is quarantined, dropping sample", name);
+    return {};
+  }
+
   const auto ts = timeFromMillis(v.time);
   const int phases = std::clamp(cache.phases, 1, 3);
 

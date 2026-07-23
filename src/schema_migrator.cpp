@@ -39,14 +39,10 @@ SchemaMigrator::SchemaMigrator(pg::Conn &conn) : conn_(conn) {
 std::expected<void, DbError> SchemaMigrator::checkExtensions() {
   // Extensions that must exist *in this database*. Only timescaledb qualifies:
   // the per-device sample tables are hypertables and the rollup uses
-  // first()/last(), all resolved in the bridge's own database.
-  //
-  // pg_cron is deliberately NOT checked here. It can be created in only one
-  // database per cluster (cron.database_name) and is commonly kept in a
-  // dedicated database, scheduling the rollup against this one via
-  // cron.schedule_in_database(). The bridge never calls pg_cron itself, so
-  // requiring it in this database would be wrong for that topology and is not
-  // a reliable signal that the rollup is set up. See DEPLOYMENT.md.
+  // first()/last(). pg_cron is deliberately not checked -- it can be created
+  // in only one database per cluster and is commonly kept in a dedicated one,
+  // scheduling the rollup here via cron.schedule_in_database(), and the bridge
+  // never calls it. See DEPLOYMENT.md.
   static constexpr std::array<const char *, 1> required{"timescaledb"};
 
   // Read-only probe: no transaction needed, each query runs in autocommit.
@@ -118,11 +114,10 @@ SchemaMigrator::createSchema(std::string_view schemaName) {
 
 std::expected<void, DbError>
 SchemaMigrator::setSearchPath(std::string_view schemaName) {
-  // SET LOCAL so the search_path is scoped to this transaction and reverts on
-  // commit, never leaking to later operations on the shared connection. The
-  // device schema comes first (its objects are preferred and new objects land
-  // there); public follows so the timescaledb functions resolve. The rollup
-  // function's SET search_path FROM CURRENT captures this exact value.
+  // SET LOCAL so the search_path is scoped to this transaction and never leaks
+  // to later operations on the shared connection. The device schema comes
+  // first (its objects are preferred and new objects land there); public
+  // follows so the timescaledb functions resolve.
   if (auto res = conn_.exec("SET LOCAL search_path TO " +
                                 conn_.quoteName(schemaName) + ", public",
                             DbError::Kind::MIGRATION);
@@ -147,15 +142,12 @@ std::expected<void, DbError> SchemaMigrator::ensureSchemaVersionTable() {
 }
 
 std::expected<int, DbError> SchemaMigrator::currentVersion() {
-  // Two steps on purpose: a single "CASE WHEN to_regclass(...) IS NULL THEN 0
-  // ELSE (SELECT ... FROM schema_version) END" fails at PLAN time when the
-  // table is absent (the planner resolves every relation up front, before the
-  // CASE can short-circuit). verify() runs this against a schema that may
-  // never have been migrated, so first probe existence via to_regclass (text
-  // arg, always safe), then read the version only if the table is present.
+  // Two steps on purpose: folding this into one CASE over to_regclass fails at
+  // PLAN time when the table is absent, since the planner resolves every
+  // relation before the CASE can short-circuit. verify() runs against schemas
+  // that may never have been migrated, so probe existence first.
   //
-  // Both queries return exactly one row by construction (a scalar to_regclass
-  // and a COALESCE(MAX(...)) aggregate), so reading row 0 is always valid.
+  // Both queries return exactly one row by construction, so row 0 is valid.
   auto reg = conn_.exec("SELECT to_regclass('schema_version')",
                         DbError::Kind::MIGRATION);
   if (!reg)

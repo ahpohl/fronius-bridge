@@ -1,0 +1,33 @@
+-- =============================================================================
+-- fronius-bridge: per-device inverter schema (migration 007)
+--
+-- Constrain device to a single row.
+--
+-- A schema belongs to one physical inverter for its whole lifetime: the
+-- samples in it are that inverter's readings, and its energy counters are that
+-- inverter's counters. Nothing in the sample tables references serial_number,
+-- so a second device row would not corrupt anything visibly -- it would
+-- silently claim that two inverters produced one continuous counter series.
+-- Making the table structurally single-row turns that from an invisible
+-- data-quality problem into an insert that cannot happen.
+--
+-- The consumer compares the reported serial against the stored one before
+-- upserting and quarantines the device on a mismatch, so this index should
+-- never actually reject anything. It is the schema-level backstop for that
+-- check, not the mechanism: a unique violation surfaces as a query error the
+-- consumer warns about and continues past, which would leave the sample
+-- tables unprotected.
+--
+-- Replacing the hardware means a new schema, not a new row: name the device
+-- differently in the config and let it build its own history. Site totals sum
+-- across schemas, so a replaced inverter still contributes to them.
+--
+-- ASCII only: this file is folded into the binary via #embed into a char
+-- array, so any non-ASCII byte would break the build.
+-- =============================================================================
+
+-- Unique on a constant expression: every row collides with every other row,
+-- so at most one can exist. Left unnamed in the constraint sense (an index,
+-- not a table constraint) because the expression form has no CHECK equivalent
+-- that can span rows.
+CREATE UNIQUE INDEX device_singleton_idx ON device ((true));

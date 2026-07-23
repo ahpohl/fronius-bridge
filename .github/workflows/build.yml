@@ -39,17 +39,28 @@ jobs:
             libcli11-dev \
             libpq-dev
 
-      - name: Download prebuilt libfronius .debs
+      # Build the library from master instead of installing the latest
+      # released deb. This job is the canary for library API changes: an
+      # incompatible change lands here on the commit that introduces it,
+      # rather than staying invisible until the next libfronius release is
+      # published. release.yml and docker.yml stay pinned to a tag on
+      # purpose -- a published artifact has to be reproducible.
+      #
+      # Not a shallow clone: the library takes its version from git describe
+      # and silently falls back to 0.0.0 without the tag history, which would
+      # give the .so a SOVERSION of 0.
+      - name: Build and install libfronius from master
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          CC: gcc-16
+          CXX: g++-16
         run: |
-          gh release download --repo ahpohl/libfronius --pattern 'libfronius*_amd64.deb' --clobber
-          gh release download --repo ahpohl/libfronius --pattern 'libfronius-dev*_amd64.deb' --clobber
-          ls -l *.deb
-
-      - name: Install downloaded .debs
-        run: |
-          sudo apt-get install -y ./libfronius*amd64.deb
+          git clone --branch master https://github.com/ahpohl/libfronius.git \
+            /tmp/libfronius
+          cmake -S /tmp/libfronius -B /tmp/libfronius/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/libfronius/build
+          sudo cmake --install /tmp/libfronius/build
+          sudo ldconfig
 
       - name: Configure (Ninja)
         env:

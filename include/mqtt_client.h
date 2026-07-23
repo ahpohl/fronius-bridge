@@ -27,13 +27,33 @@ private:
   // Drives mosquitto_loop() with our own reconnect/backoff, replacing
   // mosquitto_loop_start() (whose thread quits on a TLS/protocol rejection).
   void networkLoop();
+
+  // Final bounded write pass, run by networkLoop() after its main loop.
+  void drainOutgoing();
+
   MqttConfig cfg_;
+
+  // Bridge-level availability, `<mqtt.topic>/availability`. MQTT allows one
+  // will per connection, so the per-device topics cannot each have one;
+  // consumers AND this with the per-device topic to decide whether a device's
+  // reading is live.
+  std::string availabilityTopic_;
 
   // Logger
   std::shared_ptr<spdlog::logger> logger_;
 
   // State
   std::atomic<bool> connected_{false};
+
+  // Both loops run for as long as this object lives, not until the signal, so
+  // the availability publishes issued by the masters' destructors are still
+  // drained. Cleared by ~MqttClient(), which runs after every master.
+  std::atomic<bool> active_{true};
+
+  // Set by run() once its final flush pass has returned; tells drainOutgoing()
+  // there is nothing more coming.
+  std::atomic<bool> flushDone_{false};
+
   struct mosquitto *mosq_ = nullptr;
   std::thread worker_;
   std::thread networkThread_;

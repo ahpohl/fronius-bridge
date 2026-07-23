@@ -6,9 +6,11 @@
 #include "inverter_types.h"
 #include "meter_types.h"
 #include "signal_handler.h"
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <expected>
 #include <memory>
@@ -22,10 +24,9 @@
 #include <variant>
 #include <vector>
 
-// Forward-declared so this header stays free of <libpq-fe.h>: the connection is
-// held by unique_ptr and only postgres_client.cpp needs the complete type.
-// This keeps libpq out of every TU that merely constructs the consumer
-// (notably main.cpp).
+// Forward-declared so this header stays free of <libpq-fe.h>: only
+// postgres_client.cpp needs the complete type, which keeps libpq out of every
+// TU that merely constructs the consumer (notably main.cpp).
 namespace pg {
 class Conn;
 }
@@ -40,19 +41,21 @@ class Conn;
 //
 // Per-device schemas: each configured device gets its own PostgreSQL schema
 // named after the device (e.g. "primo", "grid", "heatpump"). There is no
-// central device registry and no device_id - identity is the schema. The
-// device's configured `name`, threaded through every callback, is both the
-// schema name and the key into the in-memory caches. On a device's first
-// Device event the worker lazily creates/verifies its schema (via
-// SchemaMigrator) and builds the schema-qualified SQL it will reuse for that
-// device; value rows then insert straight into that schema.
+// central device registry and no device_id - identity is the schema, and the
+// device's configured `name` is both the schema name and the key into the
+// in-memory caches. On a device's first Device event the worker lazily
+// creates/verifies its schema (via SchemaMigrator) and builds the
+// schema-qualified SQL it reuses for that device.
 //
 // All fallible setup beyond config validation (connect, extension check,
 // schema migration, device upserts) happens on the worker thread so a
 // transient DB outage at startup does not block the rest of the bridge.
 //
-// Lifetime: held as std::unique_ptr<PostgresClient> in main(); the
-// destructor wakes and joins the worker (std::jthread).
+// Lifetime: held in main() so it outlives every master that feeds it. The
+// worker runs until this object is destroyed, not until the shutdown signal,
+// so the availability transitions the master destructors emit after the signal
+// are still written -- the same arrangement MqttClient uses, down to the
+// active_ flag.
 // ---------------------------------------------------------------------------
 
 class PostgresClient {
@@ -80,13 +83,28 @@ public:
   void onInverter(std::string deviceName, InverterTypes::Values values);
   void onMeter(std::string deviceName, MeterTypes::Values values);
 
+  // Availability transition for one device, wired to the same master callback
+  // that publishes <topic>/<class>/<name>/availability. `online` is true for
+  // "connected", false for "disconnected".
+  void onAvailability(std::string deviceName, bool online);
+
 private:
+  // Availability transition. Queued rather than acted on inline so the worker
+  // sees it in order with that device's other events - a disconnect must not
+  // overtake the values that preceded it. `time` is epoch milliseconds UTC,
+  // taken when the master reported the transition, since the write can trail
+  // by a whole reconnect backoff.
+  struct Availability {
+    bool online{false};
+    std::uint64_t time{0};
+  };
+
   // Tagged payload for the worker queue. `deviceName` carries the schema /
   // cache identity so the worker need not inspect the payload to route it.
   struct Event {
     std::string deviceName;
     std::variant<InverterTypes::Device, MeterTypes::Device,
-                 InverterTypes::Values, MeterTypes::Values>
+                 InverterTypes::Values, MeterTypes::Values, Availability>
         payload;
   };
 
@@ -111,13 +129,32 @@ private:
                        const InverterTypes::Device &dev);
   std::expected<void, DbError> upsertMeterDevice(const std::string &name,
                                                  const MeterTypes::Device &dev);
+
+  // Refuse to write `serial` into `name`'s device table unless it is the
+  // device that table already belongs to: absent means first run and the
+  // upsert establishes the baseline, equal means the same hardware came back,
+  // anything else quarantines this device. Runs before every device upsert, so
+  // it must stay cheap -- one indexed single-row read.
+  std::expected<void, DbError> checkDeviceIdentity(const std::string &name,
+                                                   const std::string &serial);
+
+  // Track the device's online state and stamp last_seen on the online ->
+  // offline edge, so a device that stops reporting keeps the time it was last
+  // heard from rather than the time of its last successful upsert.
+  std::expected<void, DbError> updateAvailability(const std::string &name,
+                                                  const Availability &av);
+
+  // True only when the last availability transition processed for `name` was a
+  // disconnect. A device with no transition yet reads false: the caller uses
+  // this to hold back a write, so the unknown case must fall through.
+  bool isKnownOffline(const std::string &name) const;
+
   std::expected<void, DbError>
   insertInverterValues(const std::string &name, const InverterTypes::Values &v);
   std::expected<void, DbError> insertMeterValues(const std::string &name,
                                                  const MeterTypes::Values &v);
 
-  // Sleep with backoff, observing handler_.isRunning() so shutdown is
-  // responsive.
+  // Sleep with backoff, observing active_ so destruction is responsive.
   void sleepBackoff(std::chrono::seconds duration);
 
   // Open the libpq SQL trace file (lazy, once per process) and attach the
@@ -137,22 +174,33 @@ private:
   std::queue<Event> queue_;
   std::size_t droppedSinceLastLog_{0};
 
+  // The worker runs for as long as this object lives, not until the signal, so
+  // the availability transitions the masters' destructors emit are still
+  // drained. Cleared by ~PostgresClient(), which runs after every master.
+  // Written under queueMutex_ so it cannot be cleared between a waiter
+  // evaluating the predicate and going to sleep.
+  std::atomic<bool> active_{true};
+
   // ------ worker-thread-only state (no locking required)
   //
   // Keyed on the configured device name (= schema name). Each entry caches the
-  // device descriptor, the cardinality/modal flags that decide which child
-  // rows to write, and the schema-qualified SQL built once when the schema is
-  // first set up. Caching the SQL (rather than preparing statements) keeps the
-  // per-schema story simple and survives reconnects unchanged: the strings are
-  // connection-independent, so a reconnect just replays the cached upserts with
-  // no statements to re-register.
+  // device descriptor, the cardinality flags that decide which child rows to
+  // write, and the schema-qualified SQL built once when the schema is first set
+  // up. Caching SQL strings rather than preparing statements survives a
+  // reconnect unchanged: there is nothing to re-register.
 
   struct CachedInverter {
     InverterTypes::Device device; // last upsert, replayed on reconnect
+    // Set when checkDeviceIdentity() rejected this device: its schema belongs
+    // to other hardware, or the serial is untrustworthy. Blocks the device row
+    // and every sample for it until an identity read passes again, leaving the
+    // other devices writing normally.
+    bool identityRejected{false};
     bool isHybrid{false};
     int phases{0};
     int inputs{0};
     std::string upsertSql;
+    std::string touchSql;
     std::string valuesSql;
     std::string phaseSql;
     std::string inputSql;
@@ -160,8 +208,10 @@ private:
 
   struct CachedMeter {
     MeterTypes::Device device;
+    bool identityRejected{false}; // see CachedInverter::identityRejected
     int phases{0};
     std::string upsertSql;
+    std::string touchSql;
     std::string valuesSql;
     std::string phaseSql;
   };
@@ -180,6 +230,16 @@ private:
   std::unique_ptr<pg::Conn> conn_;
   std::unordered_map<std::string, CachedInverter> cachedInverters_;
   std::unordered_map<std::string, CachedMeter> cachedMeters_;
+
+  // Last availability state seen per device name, so only the online ->
+  // offline edge stamps last_seen. Every master already gates its availability
+  // callback on transitions; this is the consumer-side backstop, since a
+  // repeated "disconnected" that got through would move a stamp forward
+  // silently, the one failure mode nothing downstream could notice. Kept
+  // outside the caches because "connected" arrives before the first device
+  // read creates the cache entry.
+  std::unordered_map<std::string, bool> deviceOnline_;
+
   bool extensionsChecked_{false};
 
   // ------ thread (must be last; joined in destructor)

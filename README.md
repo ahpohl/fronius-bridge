@@ -143,6 +143,7 @@ meters:
       power_factor: 0.98
       leading: false    # false = inductive (lagging), true = capacitive (leading)
       frequency: 50.00
+    reconnect_delay: { min: 5, max: 320, exponential: true }
     slave:
       tcp:
         listen: 0.0.0.0
@@ -205,7 +206,7 @@ logger:
 - **`type: fronius`** *(default)* — a SunSpec/Fronius meter reached over Modbus (TCP or RTU). All per-device fields above apply. Two register models are auto-detected on connect — no manual selection needed:
   - *Fronius TS 65A-3 proprietary* — direct RTU connection to a TS 65A-3 smart meter.
   - *SunSpec* — all other cases: meter proxied via an inverter's TCP interface (use `unit_id: 240` for the primary meter, 241 for secondary), or any standalone SunSpec-compatible meter.
-- **`type: ebz`** — an EBZ Easymeter read passively over a USB-IR head on a dedicated serial line (SML/OBIS telegrams), not Modbus. It accepts only `rtu` and an optional `grid` block; the Modbus-only keys (`tcp`, `unit_id`, `update_interval`, `response_timeout`, `reconnect_delay`) are rejected at config-load. It owns its serial line exclusively — the path may not be shared with any master or slave — and publishes as telegrams arrive rather than on a poll interval. At most one `type: ebz` meter may be configured, since an installation has a single grid meter. For building the USB-IR read head and the meter hardware itself, see the [smartmeter-gateway](https://github.com/ahpohl/smartmeter-gateway) project and its wiki. The EBZ reports only active power and energy; reactive and apparent quantities and per-phase currents are derived from the `grid` assumptions:
+- **`type: ebz`** — an EBZ Easymeter read passively over a USB-IR head on a dedicated serial line (SML/OBIS telegrams), not Modbus. It accepts `rtu`, an optional `grid` block, and an optional `reconnect_delay` governing its serial connect/reconnect backoff; the Modbus-only keys (`tcp`, `unit_id`, `update_interval`, `response_timeout`) are rejected at config-load. It owns its serial line exclusively — the path may not be shared with any master or slave — and publishes as telegrams arrive rather than on a poll interval. At most one `type: ebz` meter may be configured, since an installation has a single grid meter. For building the USB-IR read head and the meter hardware itself, see the [smartmeter-gateway](https://github.com/ahpohl/smartmeter-gateway) project and its wiki. The EBZ reports only active power and energy; reactive and apparent quantities and per-phase currents are derived from the `grid` assumptions:
   - grid.power_factor: assumed power factor, range (0.0, 1.0] (default 0.95).
   - grid.frequency: assumed grid frequency in Hz (default 50.0).
   - grid.leading: `true` if the assumed reactive power is leading, else lagging (default false).
@@ -318,6 +319,7 @@ Each topic carries both a device class segment (`inverter` or `meter`) and the d
 
 | Component | Subtopic                                  | Content                         |
 |-----------|-------------------------------------------|---------------------------------|
+| Bridge    | `<topic>/availability`                    | `connected` or `disconnected`   |
 | Inverter  | `<topic>/inverter/<name>/values`          | Telemetry (power, energy, etc.) |
 | Inverter  | `<topic>/inverter/<name>/events`          | Faults and alarms               |
 | Inverter  | `<topic>/inverter/<name>/device`          | Static device metadata          |
@@ -327,6 +329,18 @@ Each topic carries both a device class segment (`inverter` or `meter`) and the d
 | Meter     | `<topic>/meter/<name>/availability`       | `connected` or `disconnected`   |
 
 For example, with `mqtt.topic: fronius-bridge` and a meter named `heatpump`, the telemetry topic is `fronius-bridge/meter/heatpump/values`.
+
+### Availability
+
+There are two levels, and a device's readings are live only when both say so.
+
+`<topic>/availability` covers the bridge process. It is registered as the MQTT last will, so the broker publishes `disconnected` on our behalf if the process dies without disconnecting — killed, out of memory, or the host losing power. MQTT permits one will per connection, which is why this is a single bridge-level topic rather than one will per device. On a graceful exit the broker discards the will and the bridge publishes `disconnected` itself.
+
+`<topic>/<class>/<name>/availability` covers one device's link to the bridge: a meter can be `disconnected` on a dead Modbus bus while the bridge itself is `connected`.
+
+Both levels use the same `connected`/`disconnected` payloads, so a consumer can subscribe to `<topic>/availability` and `<topic>/+/+/availability` and apply one rule to both.
+
+Note the will is not immediate. The broker declares a client dead after 1.5x the keepalive interval, which is 60 s here, so an unclean death shows up as `disconnected` about 90 seconds later. A graceful shutdown is immediate. In Home Assistant, list both topics and set `availability_mode: all`.
 
 ### Example payloads
 

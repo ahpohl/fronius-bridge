@@ -24,6 +24,12 @@ using json = nlohmann::json;
 
 int main(int argc, char *argv[]) {
 
+  // First statement in main: this establishes signal disposition, including
+  // ignoring SIGPIPE, before anything can write to a stdout that may be a
+  // pipe. Declared here it also outlives every object below that holds a
+  // reference to it.
+  SignalHandler handler;
+
   // --- Command line parsing ---
   CLI::App app{PROJECT_NAME " - " PROJECT_DESCRIPTION};
 
@@ -93,8 +99,7 @@ int main(int argc, char *argv[]) {
                      "consider using --user/--group options");
   }
 
-  // --- Setup signals and shutdown
-  SignalHandler handler;
+  // --- Object lifetimes ---
 
   // All objects are declared here so their lifetimes are identical.
   // Parallel vectors cfg.meters / meterMasters / meterSlaves are kept
@@ -102,26 +107,21 @@ int main(int argc, char *argv[]) {
   // meterSlaves[i] is nullptr when meter i has no `slave` block.
   //
   // Declaration order matters here. Destruction runs in reverse, so:
-  //   1. inverterMasters and meterMasters destruct first. A Modbus master's
-  //      destructor (every inverter, and Fronius meters) calls
-  //      bus_->unregisterDevice() to cancel any in-flight retry loop, then
-  //      bus_->removeBusCallback() for each bus-level callback it registered;
-  //      both must see a live FroniusBus so the bus can synchronously join its
-  //      retry threads and wait out any in-flight callback invocation. An EBZ
-  //      meter master holds no bus — it owns a serial fd and a read thread —
-  //      so its destructor just joins that thread and closes the fd; it is
-  //      unaffected by `buses` below but, like the others, must destruct
-  //      before `mqtt` (see step 4).
+  //   1. inverterMasters and meterMasters destruct first. A Modbus master
+  //      unregisters its device and removes its bus callbacks, both of which
+  //      need a live FroniusBus so the bus can synchronously join its retry
+  //      threads and wait out any in-flight callback. An EBZ meter master
+  //      holds no bus and just joins its read thread and closes its fd.
   //   2. `buses` then drops the last shared_ptr<FroniusBus> for each bus.
   //      Each FroniusBus destructor joins its bus thread and cancels any
   //      pending transactions.
   //   3. meterSlaves destruct independently of the buses — they own their
   //      own listener thread and modbus context.
-  //   4. mqtt destructs last among the I/O objects so that final
-  //      availability publishes from master destructors land successfully.
-  //      The optional PostgresClient sits with mqtt: it is a peer consumer the
-  //      master callbacks feed, so it must outlive every master. It joins its
-  //      own worker thread on destruction.
+  //   4. mqtt and the optional PostgresClient destruct last, so the final
+  //      availability publishes from the master destructors still reach the
+  //      broker and stamp last_seen on the device rows. Both therefore run
+  //      until their own destructor rather than stopping at the shutdown
+  //      signal.
   std::unique_ptr<MqttClient> mqtt;
   std::unique_ptr<PostgresClient> postgres;
   std::vector<std::unique_ptr<MeterSlave>> meterSlaves;
@@ -131,10 +131,8 @@ int main(int argc, char *argv[]) {
 
   try {
     // --- Start meter slaves ---
-    // Slaves come first because they bind (potentially privileged) TCP
-    // ports and need to do so before we drop root. The vector is index-
-    // aligned with cfg.meters: meterSlaves[i] corresponds to cfg.meters[i]
-    // and is nullptr when that meter has no `slave` block.
+    // Slaves come first because they bind (potentially privileged) TCP ports
+    // and need to do so before we drop root. Index-aligned with cfg.meters.
     meterSlaves.reserve(cfg.meters.size());
     for (const auto &m : cfg.meters) {
       if (m.slave) {
@@ -179,29 +177,24 @@ int main(int argc, char *argv[]) {
 
     // --- Build bus registry + startup summary ---
     // cfg.buses is the derived, deduplicated set of buses (one per unique
-    // RS-485 device path or TCP endpoint), synthesised by loadConfig() from
-    // the inverter and meter sections — reconnect-delay already aggregated
-    // across devices that share a bus. A single pass turns each entry into
-    // exactly one FroniusBus (devices sharing a physical line share the
-    // instance and serialise wire access through it) and logs one info line
-    // describing it, so the wiring is visible in normal operation without
-    // enabling debug. busSummaryLine() covers both transports; the EBZ
-    // Easymeter reads a dedicated SML serial line, never joins a bus, and is
-    // absent here. No hardware is opened until the connect() calls below.
+    // RS-485 device path or TCP endpoint), synthesised by loadConfig() with
+    // reconnect-delay already aggregated across devices that share a bus. One
+    // pass turns each entry into exactly one FroniusBus — devices sharing a
+    // physical line share the instance and serialise wire access through it —
+    // and logs one info line, so the wiring is visible without enabling debug.
+    // No hardware is opened until the connect() calls below.
     //
     // The 'bus' logger is dedicated so per-bus output can be silenced or
-    // surfaced independently of the main and per-device modules; resolve it
-    // once here for both the summary and the diagnostic callback below.
+    // surfaced independently of the other modules; resolve it once here.
     auto busLogger = spdlog::get("bus");
 
     // Decide the libmodbus wire trace here, not in makeBusConfig(): the bus
     // registry is built during loadConfig(), before setupLogging() has
-    // registered any logger, so the flag cannot be resolved at config-build
-    // time. The hex dump is the most verbose bus diagnostic and sits one level
-    // below the per-transaction 'bus' debug lines: `bus: debug` yields
-    // queue/tx/rx diagnostics, `bus: trace` additionally turns on the raw
-    // libmodbus wire dump. Only a dedicated 'bus' logger at trace level opts
-    // in — a global trace level does not, matching the original behaviour.
+    // registered any logger. The hex dump sits one level below the
+    // per-transaction 'bus' debug lines, so `bus: debug` yields queue/tx/rx
+    // diagnostics and `bus: trace` additionally turns on the raw wire dump.
+    // Only a dedicated 'bus' logger at trace level opts in; a global trace
+    // level does not.
     const bool busTrace =
         busLogger && busLogger->level() == spdlog::level::trace;
 
@@ -215,30 +208,27 @@ int main(int argc, char *argv[]) {
     }
 
     // --- Register bus log callback ---
-    // Per-bus diagnostic output (queue depth, slave switches, tx/rx
-    // outcomes) goes to the same 'bus' logger at debug level. spdlog
-    // defaults to info-level for unregistered loggers, so these lines are
-    // filtered out by default; users opt in with `bus: debug` (or `trace`)
-    // in the YAML logger.modules section.
+    // Per-bus diagnostic output (queue depth, slave switches, tx/rx outcomes)
+    // goes to the same 'bus' logger at debug level. spdlog defaults
+    // unregistered loggers to info, so users opt in with `bus: debug` (or
+    // `trace`) in the YAML logger.modules section.
     for (auto &[key, bus] : buses)
       bus->addBusLogCallback(
           [busLogger](const std::string &msg) { busLogger->debug("{}", msg); });
 
     // --- Start meter masters ---
     // Each meter master's value/device callbacks publish to MQTT under
-    // <base>/meter/<name>/<suffix> and, if this meter has a slave block,
-    // feed that slave's register map. The 'meter' class segment lets
-    // downstream consumers subscribe to e.g. fronius-bridge/meter/+/values
-    // to receive every meter without an explicit name allow-list.
+    // <base>/meter/<name>/<suffix> and, if this meter has a slave block, feed
+    // that slave's register map. The 'meter' class segment lets consumers
+    // subscribe to e.g. <base>/meter/+/values without a name allow-list.
     meterMasters.reserve(cfg.meters.size());
     for (std::size_t i = 0; i < cfg.meters.size(); ++i) {
       const auto &mcfg = cfg.meters[i];
 
-      // Construct the kind-appropriate master. Fronius meters attach to a
-      // shared Modbus bus (looked up by the key their bus config produces);
-      // the EBZ Easymeter owns its serial line and takes no bus. Both are
-      // held through the MeterMaster base, so the callback wiring below is
-      // identical regardless of kind.
+      // Construct the kind-appropriate master: Fronius meters attach to a
+      // shared Modbus bus, the EBZ Easymeter owns its serial line and takes
+      // none. Both are held through the MeterMaster base, so the callback
+      // wiring below is identical regardless of kind.
       std::unique_ptr<MeterMaster> master;
       if (auto key = busKeyOf(mcfg)) {
         master = std::make_unique<FroniusMeter>(mcfg, handler, buses.at(*key));
@@ -246,13 +236,12 @@ int main(int argc, char *argv[]) {
         master = std::make_unique<EasyMeter>(mcfg, handler);
       }
 
-      // Raw pointer to the slave, lifetime-aligned with the master via
-      // the index-aligned vectors above. nullptr when this meter has no
-      // slave block.
+      // Raw pointer to the slave, lifetime-aligned with the master via the
+      // index-aligned vectors above. nullptr when this meter has no slave.
       MeterSlave *slavePtr = meterSlaves[i].get();
 
-      // Capture the topic base by value so the lambdas don't depend on
-      // cfg outliving them (which it does, but explicit is better).
+      // Capture the topic base by value so the lambdas do not depend on cfg
+      // outliving them.
       const std::string topicBase = cfg.mqtt.topic + "/meter/" + mcfg.name;
       const std::string name = mcfg.name;
 
@@ -279,7 +268,12 @@ int main(int argc, char *argv[]) {
           });
 
       master->setAvailabilityCallback(
-          [&mqtt, topicBase](std::string availability) {
+          [&mqtt, &postgres, topicBase, name](std::string availability) {
+            // Same transition the broker sees, so the device row's last_seen
+            // records when the meter stopped answering rather than when its
+            // descriptor was last refreshed.
+            if (postgres)
+              postgres->onAvailability(name, availability == "connected");
             mqtt->publish(std::move(availability), topicBase + "/availability");
           });
 
@@ -319,7 +313,9 @@ int main(int argc, char *argv[]) {
           });
 
       inv->setAvailabilityCallback(
-          [&mqtt, topicBase](const std::string &availability) {
+          [&mqtt, &postgres, topicBase, name](const std::string &availability) {
+            if (postgres)
+              postgres->onAvailability(name, availability == "connected");
             mqtt->publish(availability, topicBase + "/availability");
           });
 
@@ -329,11 +325,10 @@ int main(int argc, char *argv[]) {
       mainLogger->info("No inverters configured");
 
     // --- Start the buses ---
-    // bus->connect() is called only now, after every master sharing each
-    // bus has constructed and registered its callbacks. Calling it earlier
-    // would race: the bus thread could fire onBusConnect_ before later
-    // masters added their callbacks. The bus's running_.exchange(true)
-    // guard makes this a single-shot per bus.
+    // Only now, after every master sharing each bus has constructed and
+    // registered its callbacks. Calling it earlier would race: the bus thread
+    // could fire onBusConnect_ before later masters added theirs. The bus's
+    // running_.exchange(true) guard makes this single-shot per bus.
     for (auto &[key, bus] : buses)
       bus->connect();
 

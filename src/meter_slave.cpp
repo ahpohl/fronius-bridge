@@ -19,10 +19,9 @@ MeterSlave::MeterSlave(const MeterSlaveConfig &cfg, std::string meterName,
                        SignalHandler &signalHandler)
     : name_(std::move(meterName)), cfg_(cfg), handler_(signalHandler) {
 
-  // Fixed class-based logger chain: meter.slave -> meter -> default.
-  // The meter name is no longer part of the logger name (it already
-  // appears in connect/disconnect messages), so all meter slaves share
-  // one configurable module.
+  // Fixed class-based logger chain: meter.slave -> meter -> default. The meter
+  // name is not part of the logger name (it already appears in the
+  // connect/disconnect messages), so all meter slaves share one module.
   logger_ = spdlog::get("meter.slave");
   if (!logger_)
     logger_ = spdlog::get("meter");
@@ -156,9 +155,9 @@ MeterSlave::handleResult(std::expected<void, ModbusError> &&result) {
     return MeterTypes::ErrorAction::RECONNECT;
 
   } else if (err.severity == ModbusError::Severity::RECONNECT) {
-    // Same recovery as TRANSIENT, logged apart and quieter. Without this the
-    // error would fall through to ErrorAction::NONE and the listener would
-    // keep serving on a descriptor the peer has closed.
+    // Same recovery as TRANSIENT, logged apart and quieter. Without it the
+    // error would fall through to ErrorAction::NONE and the listener would keep
+    // serving on a descriptor the peer has closed.
     logger_->debug("Modbus connection lost: {}", err.describe());
     return MeterTypes::ErrorAction::RECONNECT;
 

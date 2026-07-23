@@ -64,7 +64,7 @@ jobs:
       - name: Download libfronius debs
         env:
           GH_TOKEN: ${{ github.token }}
-          LIBFRONIUS_VERSION: v1.3.6
+          LIBFRONIUS_VERSION: v1.4.0
         run: |
           gh release download "${LIBFRONIUS_VERSION}" --repo ahpohl/libfronius --pattern "libfronius*_${{ matrix.deb_arch }}.deb" --clobber
           ls -l *.deb

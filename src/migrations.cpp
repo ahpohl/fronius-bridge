@@ -9,17 +9,15 @@
 //
 // Materializes embedded SQL bodies via #embed (P1967) and builds the per-kind
 // registries that SchemaMigrator consumes. The bytes live in exactly one
-// translation unit; everywhere else sees only the spans.
+// translation unit; everywhere else sees only the spans. Paths are resolved
+// relative to the project root via the --embed-dir flag set in CMakeLists.txt.
 //
-// The trailing ',0' on each #embed array guarantees NUL termination so the
-// bytes can be wrapped in a string_view safely (size - 1 drops the NUL).
+// The trailing ',0' on each array guarantees NUL termination so the bytes can
+// be wrapped in a string_view safely (size - 1 drops the NUL).
 //
-// SQL files are required to be pure ASCII so the bytes fit a signed 'char'
-// array without -Wnarrowing. Non-ASCII text (em dashes, smart quotes, accented
-// characters) must be transliterated to ASCII before embedding.
-//
-// The #embed paths are resolved relative to the project root via the
-// --embed-dir flag set in CMakeLists.txt.
+// SQL files must be pure ASCII so the bytes fit a signed 'char' array without
+// -Wnarrowing; transliterate em dashes, smart quotes and accented characters
+// before embedding.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -56,12 +54,20 @@ constexpr char inverter006[] = {
 #embed "db/inverter/006_sample_span.sql"
     , 0};
 
+constexpr char inverter007[] = {
+#embed "db/inverter/007_device_singleton.sql"
+    , 0};
+
 constexpr char meter003[] = {
 #embed "db/meter/003_power_agg.sql"
     , 0};
 
 constexpr char meter004[] = {
 #embed "db/meter/004_retention.sql"
+    , 0};
+
+constexpr char meter005[] = {
+#embed "db/meter/005_device_singleton.sql"
     , 0};
 
 constexpr char public001[] = {
@@ -93,6 +99,8 @@ constexpr std::array inverterArray = {
               std::string_view{inverter005, sizeof(inverter005) - 1}},
     Migration{6, "sample_span",
               std::string_view{inverter006, sizeof(inverter006) - 1}},
+    Migration{7, "device_singleton",
+              std::string_view{inverter007, sizeof(inverter007) - 1}},
 };
 
 constexpr std::array meterArray = {
@@ -100,6 +108,8 @@ constexpr std::array meterArray = {
     Migration{2, "rollup", std::string_view{meter002, sizeof(meter002) - 1}},
     Migration{3, "power_agg", std::string_view{meter003, sizeof(meter003) - 1}},
     Migration{4, "retention", std::string_view{meter004, sizeof(meter004) - 1}},
+    Migration{5, "device_singleton",
+              std::string_view{meter005, sizeof(meter005) - 1}},
 };
 
 constexpr std::array publicArray = {

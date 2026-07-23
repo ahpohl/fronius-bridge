@@ -20,10 +20,9 @@ FroniusMeter::FroniusMeter(const MeterConfig &cfg, SignalHandler &signalHandler,
     : bus_(std::move(bus)), cfg_(cfg),
       fcfg_(std::get<FroniusMeterConfig>(cfg.body)), handler_(signalHandler) {
 
-  // Fixed class-based logger chain: meter.master -> meter -> default.
-  // The device name is no longer part of the logger name (it already
-  // appears in every connect/disconnect message), so all meter masters
-  // share one configurable module.
+  // Fixed class-based logger chain: meter.master -> meter -> default. The
+  // device name is not part of the logger name (it already appears in every
+  // connect/disconnect message), so all meter masters share one module.
   logger_ = spdlog::get("meter.master");
   if (!logger_)
     logger_ = spdlog::get("meter");
@@ -37,16 +36,38 @@ FroniusMeter::FroniusMeter(const MeterConfig &cfg, SignalHandler &signalHandler,
   // --- Bus-level callbacks ---
 
   busCallbackIds_.push_back(bus_->addBusConnectCallback([this] {
+    // Only a reopened transport can have swapped the device underneath us; a
+    // transient read error recovers on the same open port. Arming here keeps
+    // the identity re-read off the recovery path, which on a flaky RS485 line
+    // fires far more often than the transport actually reopens.
+    deviceStale_.store(true);
+
+    // Both transports log, so every reconnect is reported: without the RTU
+    // branch a recovered serial bus would show a drop and no recovery, which
+    // reads like an unresolved fault. The endpoint detail differs -- a resolved
+    // ip:port exists only for TCP -- but the line count per outage must not.
     if (fcfg_.tcp) {
       auto remote = bus_->getRemoteEndpoint();
       logger_->info("Connected to meter '{}' at {}:{}", cfg_.name, remote.ip,
                     remote.port);
+    } else if (fcfg_.rtu) {
+      const auto &r = *fcfg_.rtu;
+      logger_->info("Connected to meter '{}' on '{}' ({}{}{}, {} baud)",
+                    cfg_.name, r.device, r.dataBits, parityToChar(r.parity),
+                    r.stopBits, r.baud);
     }
   }));
 
-  busCallbackIds_.push_back(bus_->addBusDisconnectCallback([this](int delay) {
-    logger_->warn("Meter '{}' disconnected, trying to reconnect in {} {}...",
-                  cfg_.name, delay, delay == 1 ? "second" : "seconds");
+  // Two callbacks, two meanings: the drop is the state change and fires once,
+  // the retry is one failed attempt to undo it and fires per attempt with the
+  // wait about to happen. An outage recovering on the first attempt therefore
+  // reports the drop and no retry at all.
+  busCallbackIds_.push_back(bus_->addBusDisconnectCallback(
+      [this] { logger_->warn("Meter '{}' connection dropped", cfg_.name); }));
+
+  busCallbackIds_.push_back(bus_->addBusRetryCallback([this](int delay) {
+    logger_->warn("Meter '{}' reconnecting in {} {}...", cfg_.name, delay,
+                  delay == 1 ? "second" : "seconds");
   }));
 
   busCallbackIds_.push_back(
@@ -57,7 +78,7 @@ FroniusMeter::FroniusMeter(const MeterConfig &cfg, SignalHandler &signalHandler,
               true, std::format("meter '{}' Modbus bus error", cfg_.name));
         } else if (err.severity == ModbusError::Severity::RECONNECT) {
           // libfronius drops the transport and reconnects with backoff on
-          // its own; the disconnect callback above reports that at warn
+          // its own; the drop and retry callbacks above report that at warn
           // level, so this only records the underlying errno.
           logger_->debug("Modbus bus connection lost: {}", err.describe());
         } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
@@ -72,16 +93,12 @@ FroniusMeter::FroniusMeter(const MeterConfig &cfg, SignalHandler &signalHandler,
     logger_->debug("Meter '{}' register map: {}", cfg_.name,
                    FroniusTypes::toString(map));
     connected_.store(true);
-
-    if (availabilityCallback_)
-      availabilityCallback_("connected");
+    publishAvailability("connected");
   });
 
   meter_->setDeviceUnavailableCallback([this] {
     connected_.store(false);
-
-    if (availabilityCallback_)
-      availabilityCallback_("disconnected");
+    publishAvailability("disconnected");
   });
 
   meter_->setDeviceErrorCallback([this](const ModbusError &err) {
@@ -114,24 +131,21 @@ FroniusMeter::FroniusMeter(const MeterConfig &cfg, SignalHandler &signalHandler,
                   delay, delay == 1 ? "second" : "seconds");
   });
 
-  // NOTE: bus_->connect() is intentionally NOT called here. On a shared
-  // bus, main() calls connect() once after every master has constructed
-  // and registered its callbacks; connecting from each master would race
-  // with later masters' registrations.
+  // bus_->connect() is intentionally NOT called here: main() calls it once per
+  // bus after every master has constructed and registered its callbacks, since
+  // connecting from each master would race with later registrations.
 
-  // Start update loop thread. The loop body only runs once connected_
-  // flips true, which the device-ready callback above does after
-  // bus->connect() + validation.
+  // The loop body only runs once connected_ flips true, which the device-ready
+  // callback above does after bus->connect() and validation.
   worker_ = std::thread(&FroniusMeter::runLoop, this);
 }
 
 FroniusMeter::~FroniusMeter() {
-  // Detach from the bus before tearing down state that its callbacks
-  // capture: unregisterDevice cancels any in-flight per-device retry
-  // loop, and removeBusCallback synchronously waits for the bus thread
-  // to finish any in-flight invocation of each callback. If the bus
-  // outlives us (another master sharing it still holds a reference),
-  // it continues to serve other devices uninterrupted.
+  // Detach from the bus before tearing down the state its callbacks capture:
+  // unregisterDevice cancels any in-flight per-device retry loop, and
+  // removeBusCallback waits synchronously for the bus thread to finish any
+  // in-flight invocation. A bus that outlives us keeps serving its other
+  // devices uninterrupted.
   if (bus_) {
     if (meter_)
       bus_->unregisterDevice(meter_.get());
@@ -148,12 +162,11 @@ FroniusMeter::~FroniusMeter() {
   if (worker_.joinable())
     worker_.join();
 
-  // Fire one final availability update so MQTT consumers see this meter
-  // go offline. Done after the worker join so it can't race with an
-  // in-flight updateValuesAndJson(). Safe because main destroys masters
-  // before destroying MqttClient.
-  if (availabilityCallback_)
-    availabilityCallback_("disconnected");
+  // Fire one final availability update so consumers see this meter go offline.
+  // After the worker join, so it cannot race an in-flight
+  // updateValuesAndJson(); safe because main destroys masters before
+  // MqttClient. The gate suppresses it only if the meter is already offline.
+  publishAvailability("disconnected");
 
   logger_->info("Meter '{}' disconnected", cfg_.name);
 }
@@ -163,6 +176,11 @@ void FroniusMeter::runLoop() {
 
     if (connected_.load()) {
       {
+        // Consume the re-read armed by the device-ready callback. Done here so
+        // deviceGate_ is only ever touched from this thread.
+        if (deviceStale_.exchange(false))
+          deviceGate_.reset();
+
         // --- Device (once per connect; bool tells us whether to publish) ---
         auto deviceResult = updateDeviceAndJson();
         if (!deviceResult) {
@@ -499,8 +517,9 @@ std::expected<bool, ModbusError> FroniusMeter::updateDeviceAndJson() {
   logger_->debug("'{}' device: {}", cfg_.name, newJson.dump());
 
   // Record the identity as the baseline so the hasValue() guard short-circuits
-  // the Modbus re-read on subsequent polls; this is the first (and only) read,
-  // so the callback fires once.
+  // the Modbus re-read on later polls. The gate is cleared once per transport
+  // connection, so the callback fires only when a reconnected device reports a
+  // different identity than the one that went away.
   deviceGate_.changed(newDevice);
 
   // ---- Commit values ----

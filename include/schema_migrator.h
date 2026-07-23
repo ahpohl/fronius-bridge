@@ -8,10 +8,9 @@
 #include <spdlog/logger.h>
 #include <string_view>
 
-// Forward-declared so this header stays free of <libpq-fe.h>. The connection is
-// taken only by reference; just schema_migrator.cpp needs the complete type.
-// migrations.{h,cpp} include this header solely for the Migration struct and
-// must not pull in libpq.
+// Forward-declared so this header stays free of <libpq-fe.h>: the connection is
+// taken by reference and only schema_migrator.cpp needs the complete type.
+// migrations.{h,cpp} include this header solely for the Migration struct.
 namespace pg {
 class Conn;
 } // namespace pg
@@ -34,27 +33,18 @@ struct Migration {
 // SchemaMigrator
 //
 // Applies (or verifies) embedded SQL schema migrations into one PostgreSQL
-// schema per device. Each device gets its own schema (named after the device);
-// the migrator creates it, sets the search_path to '<schema>, public', and
-// tracks applied versions in a schema-local `schema_version` ledger. There is
-// no central registry: a meter schema and an inverter schema each carry their
-// own gapless 1..N version history, fed from the matching per-kind registry.
+// schema per device. The migrator creates the schema, sets the search_path to
+// '<schema>, public', and tracks applied versions in a schema-local
+// `schema_version` ledger. There is no central registry: each schema carries
+// its own gapless 1..N history, fed from the matching per-kind registry.
 //
-// All work for one schema runs in a single transaction gated by a session-wide
-// advisory lock, so two fronius-bridge instances starting against the same
-// database cannot race and a partially-migrated schema is impossible.
+// All work for one schema runs in a single transaction gated by an advisory
+// lock, so two fronius-bridge instances starting against the same database
+// cannot race and a partially-migrated schema is impossible.
 //
-// Usage (per connection, driven by PostgresClient):
-//   SchemaMigrator m{conn};
-//   if (auto r = m.checkExtensions(); !r) return std::unexpected(r.error());
-//   for each device:
-//     auto reg = isInverter ? inverterMigrations : meterMigrations;
-//     auto r = autoMigrate ? m.migrate(reg, name) : m.verify(reg, name);
-//
-// search_path note: create_hypertable() and the first()/last() aggregates are
-// provided by the timescaledb extension installed in public, so the search_path
-// is '<schema>, public' (schema first, so the device's own objects are
-// preferred and new objects land there). The rollup function's
+// The search_path puts the device schema first, so its own objects are
+// preferred and new objects land there, and public second, so the timescaledb
+// functions (create_hypertable, first()/last()) resolve. The rollup function's
 // SET search_path FROM CURRENT captures exactly this.
 // ---------------------------------------------------------------------------
 
@@ -65,9 +55,7 @@ public:
   // Verify the extension the schemas depend on *in this database* is installed
   // (timescaledb, for the hypertables and the first()/last() aggregates).
   // FATAL if missing -- installing it is a privileged operator step (see
-  // DEPLOYMENT.md). pg_cron is not checked: it commonly lives in a separate
-  // database and the bridge never calls it. Database-scoped, so call once per
-  // connection rather than per device.
+  // DEPLOYMENT.md). Database-scoped, so call once per connection.
   std::expected<void, DbError> checkExtensions();
 
   // Apply pending migrations into `schemaName`, creating the schema if needed.

@@ -57,6 +57,7 @@ meters:
       power_factor: 0.98
       leading: false    # false = inductive (lagging), true = capacitive (leading)
       frequency: 50.00
+    reconnect_delay: { min: 5, max: 320, exponential: true }
     slave:
       tcp:
         listen: 0.0.0.0
