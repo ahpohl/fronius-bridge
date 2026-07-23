@@ -27,7 +27,7 @@ RUN git clone --branch "${CLI11_VERSION}" --depth 1 \
 # libfronius is linked statically, so it exists only in this stage. The tag is
 # pinned rather than tracking master to keep image builds reproducible; bump
 # LIBFRONIUS_VERSION together with the bridge when the library API moves.
-ARG LIBFRONIUS_VERSION=v1.3.4
+ARG LIBFRONIUS_VERSION=v1.3.6
 RUN git clone --branch "${LIBFRONIUS_VERSION}" --depth 1 \
         https://github.com/ahpohl/libfronius.git /src/libfronius \
     && cmake -S /src/libfronius -B /src/libfronius/build -G Ninja \
