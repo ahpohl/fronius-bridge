@@ -24,9 +24,9 @@ RUN git clone --branch "${CLI11_VERSION}" --depth 1 \
     && cmake --build /src/cli11/build \
     && cmake --install /src/cli11/build
 
-# libfronius is linked statically, so it exists only in this stage. The tag is
-# pinned rather than tracking master to keep image builds reproducible; bump
-# LIBFRONIUS_VERSION together with the bridge when the library API moves.
+# libfronius is not packaged for Alpine, so it is built from source here. The
+# tag is pinned rather than tracking master to keep image builds reproducible;
+# bump LIBFRONIUS_VERSION together with the bridge when the library API moves.
 ARG LIBFRONIUS_VERSION=v1.3.6
 RUN git clone --branch "${LIBFRONIUS_VERSION}" --depth 1 \
         https://github.com/ahpohl/libfronius.git /src/libfronius \
@@ -41,7 +41,6 @@ COPY . /src/fronius-bridge
 RUN PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
         cmake -S /src/fronius-bridge -B /src/fronius-bridge/build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
-        -DFRONIUS_STATIC=ON \
     && cmake --build /src/fronius-bridge/build \
     && DESTDIR=/out cmake --install /src/fronius-bridge/build
 
@@ -55,6 +54,12 @@ RUN apk add --no-cache \
     yaml-cpp spdlog fmt tzdata ca-certificates
 
 COPY --from=builder /out/usr/local/ /usr/local/
+
+# libfronius is linked dynamically, so the runtime stage needs the shared
+# object. Only the SONAME and the real file are copied; the .so devel symlink,
+# the static archive and the headers stay in the builder. musl searches
+# /usr/local/lib by default, so no ldconfig step is required.
+COPY --from=builder /usr/local/lib/libfronius.so.* /usr/local/lib/
 
 # Non-root; dialout matches the usual host group of USB serial adapters. If
 # the host uses a different gid, override with group_add in the compose file.
