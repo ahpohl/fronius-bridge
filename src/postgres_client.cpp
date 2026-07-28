@@ -219,8 +219,9 @@ void PostgresClient::run() {
       continue;
     }
 
+    // A completed setup resets the backoff for the next failure. The connect
+    // itself is reported from connectAndPrepare(), where the link comes up.
     backoff = minDelay;
-    postgresLogger_->info("Postgres connected");
 
     // --- Drain the queue until the destructor asks us to stop, or until a
     //     connection-level failure. The head deliberately does not test
@@ -342,6 +343,14 @@ std::expected<void, DbError> PostgresClient::connectAndPrepare() {
     conn_.reset();
     return std::unexpected(err);
   }
+
+  // Reported here rather than after this function returns: everything below
+  // (extension check, public-schema migration, registry sync) logs its own
+  // progress, so a message emitted on the way out landed after the migration
+  // lines and read as though the schema had been built before the link came
+  // up. Every attempt dials a fresh PGconn, so a failure further down repeats
+  // this line on the retry - correct, since the previous one is closed.
+  postgresLogger_->info("Postgres connected");
 
   // --- Route server NOTICE/WARNING messages through our logger. Installed
   //     here so it covers the migrations that follow, and re-installed on
