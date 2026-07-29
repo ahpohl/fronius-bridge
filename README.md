@@ -199,7 +199,7 @@ logger:
 - update_interval: Polling interval in seconds.
 - reconnect_delay.min / .max / .exponential: Reconnect backoff. `exponential: true` ramps from min to max; `false` uses a fixed delay equal to min.
 
-**inverters** *(optional sequence)*: Each entry is one Fronius inverter, identified by `name`. Per-device fields apply.
+**inverters** *(optional sequence)*: Each entry is one Fronius inverter, identified by `name`. Per-device fields apply. A nested `slave:` block is meter-only and is rejected at config-load for inverters.
 
 **meters** *(optional sequence)*: Each entry is one smart meter, identified by `name`. A meter's `type` selects how it is read (default `fronius`):
 

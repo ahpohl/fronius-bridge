@@ -338,6 +338,15 @@ static std::vector<InverterConfig> parseInverters(const YAML::Node &node) {
   for (std::size_t i = 0; i < node.size(); ++i) {
     const auto prefix = std::format("inverters[{}]", i);
     try {
+      // Only meters serve a SunSpec slave endpoint. yaml-cpp ignores keys
+      // nobody reads, so an inverter `slave:` block would parse cleanly and
+      // then never bind: the misconfiguration would surface far downstream as
+      // a client refused by a port that was never opened. Reject it here
+      // instead, where the error names the offending entry.
+      if (node[i]["slave"])
+        throw std::runtime_error(".slave: inverters do not support a slave "
+                                 "service (meters only)");
+
       auto cfg = parseModbusMaster<InverterConfig>(node[i]);
       cfg.name = parseName(node[i]);
       result.push_back(std::move(cfg));
