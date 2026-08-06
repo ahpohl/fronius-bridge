@@ -79,6 +79,12 @@ private:
   // the gate single-threaded: libfronius fires the callback on the bus thread,
   // not on the poll thread that owns the gate.
   std::atomic<bool> deviceStale_{false};
+
+  // Set by the device-retry callback, consumed by the device-ready callback so
+  // a recovery is reported exactly when a retry announced the outage. Without
+  // the gate the ready callback would also log on startup and on every bus
+  // reconnect, where the bus-connect callback already reports the connection.
+  std::atomic<bool> retryReported_{false};
 };
 
 #endif /* FRONIUS_METER_H_ */

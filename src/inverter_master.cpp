@@ -88,6 +88,14 @@ InverterMaster::InverterMaster(const InverterConfig &cfg,
   inverter_->setDeviceReadyCallback([this](FroniusTypes::RegisterMap map) {
     logger_->debug("Inverter '{}' register map: {}", cfg_.name,
                    FroniusTypes::toString(map));
+
+    // A device that stops answering on a healthy transport recovers here, not
+    // through the bus-connect callback: the port is never reopened, so that
+    // callback stays silent and this is the only report of the recovery. The
+    // endpoint is omitted because it never changed -- only the peer did.
+    if (retryReported_.exchange(false))
+      logger_->info("Reconnected to inverter '{}'", cfg_.name);
+
     connected_.store(true);
     publishAvailability("connected");
   });
@@ -123,6 +131,7 @@ InverterMaster::InverterMaster(const InverterConfig &cfg,
   });
 
   inverter_->setDeviceRetryCallback([this](int delay) {
+    retryReported_.store(true);
     logger_->warn("Inverter '{}' unavailable, retrying in {} {}...", cfg_.name,
                   delay, delay == 1 ? "second" : "seconds");
   });

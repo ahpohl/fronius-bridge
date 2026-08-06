@@ -92,6 +92,14 @@ FroniusMeter::FroniusMeter(const MeterConfig &cfg, SignalHandler &signalHandler,
   meter_->setDeviceReadyCallback([this](FroniusTypes::RegisterMap map) {
     logger_->debug("Meter '{}' register map: {}", cfg_.name,
                    FroniusTypes::toString(map));
+
+    // A device that stops answering on a healthy transport recovers here, not
+    // through the bus-connect callback: the port is never reopened, so that
+    // callback stays silent and this is the only report of the recovery. The
+    // endpoint is omitted because it never changed -- only the peer did.
+    if (retryReported_.exchange(false))
+      logger_->info("Reconnected to meter '{}'", cfg_.name);
+
     connected_.store(true);
     publishAvailability("connected");
   });
@@ -127,6 +135,7 @@ FroniusMeter::FroniusMeter(const MeterConfig &cfg, SignalHandler &signalHandler,
   });
 
   meter_->setDeviceRetryCallback([this](int delay) {
+    retryReported_.store(true);
     logger_->warn("Meter '{}' unavailable, retrying in {} {}...", cfg_.name,
                   delay, delay == 1 ? "second" : "seconds");
   });
