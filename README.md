@@ -360,6 +360,8 @@ The entity set follows the device: the config is published from the device read,
 
 A `/` in the base topic is folded to `_`. Ids are derived from the base topic and the device name (`fronius-bridge_primo_ac_energy`), not the serial number, so a replaced inverter keeps its entities and history, and two bridges on one broker with different base topics do not collide. Renaming a device therefore creates a new Home Assistant device.
 
+The bridge also subscribes to `<prefix>/status`. When `online` arrives there, from Home Assistant starting or from an openHAB inbox scan, it publishes every config again, so a device deleted in Home Assistant or removed from the openHAB inbox is found again without restarting the bridge.
+
 Removing the `discovery` block, or a device from the config, does not withdraw what was announced, since the config messages are retained. Clear one by publishing an empty retained payload to its topic:
 
 ```sh

@@ -10,6 +10,7 @@
 #include <queue>
 #include <spdlog/logger.h>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 
@@ -31,6 +32,10 @@ private:
   // Final bounded write pass, run by networkLoop() after its main loop.
   void drainOutgoing();
 
+  // Queues every remembered discovery config again, bypassing the duplicate
+  // suppression. Run when a consumer publishes `online` on the birth topic.
+  void reannounceDiscovery();
+
   MqttConfig cfg_;
 
   // Bridge-level availability, `<mqtt.topic>/availability`. MQTT allows one
@@ -38,6 +43,13 @@ private:
   // consumers AND this with the per-device topic to decide whether a device's
   // reading is live.
   std::string availabilityTopic_;
+
+  // Home Assistant discovery, empty when mqtt.discovery is not configured.
+  // The birth topic `<prefix>/status` carries `online` when Home Assistant
+  // starts and when openHAB scans; both expect devices to announce again,
+  // since a retained config only reaches a subscriber once.
+  std::string discoveryStatusTopic_;
+  std::string discoveryRoot_;
 
   // Logger
   std::shared_ptr<spdlog::logger> logger_;
@@ -68,11 +80,15 @@ private:
   std::map<std::string, std::queue<QueuedMessage>> topicQueues_;
   std::unordered_map<std::string, std::size_t> lastPayloadHashes_;
   std::map<std::string, size_t> droppedCount_;
+  // Latest payload per discovery config topic, kept for reannounceDiscovery().
+  std::map<std::string, std::string> discoveryPayloads_;
   bool hasQueuedMessages() const;
 
   // --- callbacks
   static void onConnect(struct mosquitto *mosq, void *obj, int rc);
   static void onDisconnect(struct mosquitto *mosq, void *obj, int rc);
+  static void onMessage(struct mosquitto *mosq, void *obj,
+                        const struct mosquitto_message *msg);
   static void onLog(struct mosquitto *mosq, void *obj, int level,
                     const char *str);
 };

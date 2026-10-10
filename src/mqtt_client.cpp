@@ -38,6 +38,9 @@ constexpr int shutdownDrainTimeoutMs = 500;
 constexpr const char *availabilityConnected = "connected";
 constexpr const char *availabilityDisconnected = "disconnected";
 
+// Home Assistant's birth payload. openHAB sends the same when a scan starts.
+constexpr std::string_view discoveryOnline = "online";
+
 // MQTT 3.1.1 CONNACK "server unavailable" - the one refusal the broker can
 // recover from on its own. mosquitto.h has no named constants for these codes.
 constexpr int connackServerUnavailable = 3;
@@ -74,6 +77,11 @@ bool isFatalLoopError(int rc, int err) {
 MqttClient::MqttClient(const MqttConfig &cfg, SignalHandler &signalHandler)
     : cfg_(cfg), availabilityTopic_(cfg.topic + "/availability"),
       handler_(signalHandler) {
+
+  if (cfg_.discovery.has_value()) {
+    discoveryStatusTopic_ = cfg_.discovery->prefix + "/status";
+    discoveryRoot_ = cfg_.discovery->prefix + "/";
+  }
 
   // Setup mqtt logger
   logger_ = spdlog::get("mqtt");
@@ -152,6 +160,7 @@ MqttClient::MqttClient(const MqttConfig &cfg, SignalHandler &signalHandler)
   // Set Mosquitto callbacks
   mosquitto_connect_callback_set(mosq_, MqttClient::onConnect);
   mosquitto_disconnect_callback_set(mosq_, MqttClient::onDisconnect);
+  mosquitto_message_callback_set(mosq_, MqttClient::onMessage);
   mosquitto_log_callback_set(mosq_, MqttClient::onLog);
 
   // We drive mosquitto_loop() ourselves and publish from the worker thread.
@@ -237,6 +246,10 @@ bool MqttClient::hasQueuedMessages() const {
 
 void MqttClient::publish(std::string payload, const std::string &topic) {
   std::unique_lock<std::mutex> lock(mutex_);
+
+  if (!discoveryRoot_.empty() && topic.starts_with(discoveryRoot_) &&
+      topic.ends_with("/config"))
+    discoveryPayloads_[topic] = payload;
 
   // Duplicate suppression per topic
   std::size_t payloadHash = std::hash<std::string>{}(payload);
@@ -343,6 +356,21 @@ void MqttClient::drainOutgoing() {
   }
 }
 
+void MqttClient::reannounceDiscovery() {
+  std::map<std::string, std::string> configs;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    configs = discoveryPayloads_;
+    for (const auto &[topic, payload] : configs)
+      lastPayloadHashes_.erase(topic);
+  }
+
+  logger_->info("Discovery requested on '{}', re-announcing {} device(s)",
+                discoveryStatusTopic_, configs.size());
+  for (auto &[topic, payload] : configs)
+    publish(std::move(payload), topic);
+}
+
 void MqttClient::run() {
   while (active_.load()) {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -429,6 +457,30 @@ void MqttClient::onConnect(struct mosquitto *mosq, void *obj, int rc) {
     self->lastPayloadHashes_.erase(self->availabilityTopic_);
   }
   self->publish(availabilityConnected, self->availabilityTopic_);
+
+  // Subscriptions do not survive a reconnect (clean session), so renew it on
+  // every connect. A failure only costs the re-announce, so it is not fatal.
+  if (!self->discoveryStatusTopic_.empty()) {
+    const int subRc = mosquitto_subscribe(
+        mosq, nullptr, self->discoveryStatusTopic_.c_str(), 1);
+    if (subRc != MOSQ_ERR_SUCCESS)
+      self->logger_->warn("MQTT subscribe to '{}' failed: {} ({})",
+                          self->discoveryStatusTopic_,
+                          mosquitto_strerror(subRc), subRc);
+  }
+}
+
+// Runs on the network thread. Only the discovery birth topic is subscribed.
+void MqttClient::onMessage(struct mosquitto *mosq, void *obj,
+                           const struct mosquitto_message *msg) {
+  MqttClient *self = static_cast<MqttClient *>(obj);
+
+  if (!msg->topic || self->discoveryStatusTopic_ != msg->topic || !msg->payload)
+    return;
+  const std::string_view payload(static_cast<const char *>(msg->payload),
+                                 static_cast<std::size_t>(msg->payloadlen));
+  if (payload == discoveryOnline)
+    self->reannounceDiscovery();
 }
 
 void MqttClient::onDisconnect(struct mosquitto *mosq, void *obj, int rc) {
