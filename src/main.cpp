@@ -2,6 +2,7 @@
 #include "config_yaml.h"
 #include "easy_meter.h"
 #include "fronius_meter.h"
+#include "ha_discovery.h"
 #include "inverter_master.h"
 #include "logger.h"
 #include "meter_master.h"
@@ -158,6 +159,9 @@ int main(int argc, char *argv[]) {
 
     // --- Start MQTT client ---
     mqtt = std::make_unique<MqttClient>(cfg.mqtt, handler);
+    if (cfg.mqtt.discovery)
+      mainLogger->info("Home Assistant discovery enabled (prefix '{}')",
+                       cfg.mqtt.discovery->prefix);
 
     // --- Start optional PostgreSQL consumer ---
     // Constructed only when a postgres section is present; otherwise the
@@ -257,10 +261,19 @@ int main(int argc, char *argv[]) {
               slavePtr->updateValues(std::move(values));
           });
 
+      // Discovery is announced from the device callback because the entity
+      // set depends on the phase count and identity this read delivers. The
+      // callback is gated on identity changes, so this is not per poll.
       master->setDeviceCallback(
-          [&mqtt, &postgres, slavePtr, topicBase,
-           name](std::string jsonDump, MeterTypes::Device device) {
+          [&mqtt, &postgres, slavePtr, topicBase, name, mcfg,
+           discovery = cfg.mqtt.discovery, baseTopic = cfg.mqtt.topic](
+              std::string jsonDump, MeterTypes::Device device) {
             mqtt->publish(std::move(jsonDump), topicBase + "/device");
+            if (discovery) {
+              auto msg =
+                  HaDiscovery::meter(*discovery, baseTopic, mcfg, device);
+              mqtt->publish(std::move(msg.payload), msg.topic);
+            }
             if (postgres)
               postgres->onMeterDevice(name, device);
             if (slavePtr)
@@ -304,10 +317,17 @@ int main(int argc, char *argv[]) {
             mqtt->publish(std::move(jsonDump), topicBase + "/events");
           });
 
+      // As for meters: announced once the phase/MPPT counts are known.
       inv->setDeviceCallback(
-          [&mqtt, &postgres, topicBase, name](std::string jsonDump,
-                                              InverterTypes::Device device) {
+          [&mqtt, &postgres, topicBase, name, icfg,
+           discovery = cfg.mqtt.discovery, baseTopic = cfg.mqtt.topic](
+              std::string jsonDump, InverterTypes::Device device) {
             mqtt->publish(std::move(jsonDump), topicBase + "/device");
+            if (discovery) {
+              auto msg =
+                  HaDiscovery::inverter(*discovery, baseTopic, icfg, device);
+              mqtt->publish(std::move(msg.payload), msg.topic);
+            }
             if (postgres)
               postgres->onInverterDevice(name, std::move(device));
           });

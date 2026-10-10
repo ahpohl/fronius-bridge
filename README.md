@@ -163,6 +163,8 @@ mqtt:
   #  ca_file: /etc/ssl/certs/mqtt-ca.crt
   #  cert_file: /etc/ssl/certs/mqtt-client.crt
   #  key_file: /etc/ssl/private/mqtt-client.key
+  #discovery:
+  #  prefix: homeassistant
 
 postgres:
   dsn: "host=localhost port=5432 dbname=fronius user=fronius_bridge password=your-secure-password"
@@ -242,6 +244,8 @@ Slave fields:
   - tls_version: TLS protocol version (e.g. `tlsv1.2`, `tlsv1.3`). Defaults to the libmosquitto/OpenSSL default when omitted.
   - ciphers: OpenSSL cipher list. See `openssl ciphers` for a list of supported ciphers. Defaults to the library default when omitted.
   - insecure: Disables broker certificate and hostname verification. Accepts a self-signed certificate but provides no security — for testing only, default `false`.
+- discovery *(optional)*: Announces every device to Home Assistant and openHAB via MQTT discovery. Present means on; an empty block (`discovery: {}`) is enough. See [Home Assistant and openHAB discovery](#home-assistant-and-openhab-discovery). Keys:
+  - prefix: Discovery prefix the consumer subscribes to, default `homeassistant`. Must not contain `+` or `#` or start or end with `/`.
 
 **postgres** *(optional)*: Enables the PostgreSQL/TimescaleDB consumer. Omit the whole section to run MQTT-only. Each device is written into its own schema named after the device (`name`); full database setup, rollups, and query patterns are described in [DEPLOYMENT.md](DEPLOYMENT.md).
 - dsn: libpq connection string (e.g. `host=localhost port=5432 dbname=fronius user=fronius_bridge password=...`). Mandatory when the section is present.
@@ -341,6 +345,26 @@ There are two levels, and a device's readings are live only when both say so.
 Both levels use the same `connected`/`disconnected` payloads, so a consumer can subscribe to `<topic>/availability` and `<topic>/+/+/availability` and apply one rule to both.
 
 Note the will is not immediate. The broker declares a client dead after 1.5x the keepalive interval, which is 60 s here, so an unclean death shows up as `disconnected` about 90 seconds later. A graceful shutdown is immediate. In Home Assistant, list both topics and set `availability_mode: all`.
+
+### Home Assistant and openHAB discovery
+
+With an `mqtt.discovery` block, each device is announced on one retained config message using Home Assistant's [device-based MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#device-discovery-payload):
+
+```
+<prefix>/device/<topic>_<name>/config     e.g. homeassistant/device/fronius-bridge_primo/config
+```
+
+Home Assistant (2024.12 or newer) and openHAB's [Home Assistant binding](https://www.openhab.org/addons/bindings/homeassistant/) (5.2 or newer) then create the device and its entities without any manual channel configuration. Every numeric field of the `values` payload becomes a sensor named after the field, with device class, unit and state class set, so energy counters can be picked directly in Home Assistant's Energy dashboard. Inverters additionally get their operating `state` from the `events` topic, plus the status code and event list as diagnostic entities. The state payloads themselves are unchanged: each entity reads its field from the existing topic through a template.
+
+The entity set follows the device: the config is published from the device read, once the phase and MPPT counts are known, and again whenever a reconnected device reports a different identity. Fields a device never publishes are not announced (per-input energy on a hybrid inverter, total current on the EBZ meter, phase-to-phase voltage on a single-phase meter). Each entity lists both [availability](#availability) topics with `availability_mode: all`.
+
+A `/` in the base topic is folded to `_`. Ids are derived from the base topic and the device name (`fronius-bridge_primo_ac_energy`), not the serial number, so a replaced inverter keeps its entities and history, and two bridges on one broker with different base topics do not collide. Renaming a device therefore creates a new Home Assistant device.
+
+Removing the `discovery` block, or a device from the config, does not withdraw what was announced, since the config messages are retained. Clear one by publishing an empty retained payload to its topic:
+
+```sh
+mosquitto_pub -h <broker> -r -n -t homeassistant/device/fronius-bridge_primo/config
+```
 
 ### Example payloads
 
