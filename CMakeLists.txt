@@ -100,6 +100,7 @@ set(SRC_FILES
     src/main.cpp
     src/inverter_master.cpp
     src/config_yaml.cpp
+    src/ha_discovery.cpp
     src/mqtt_client.cpp
     src/fronius_meter.cpp
     src/easy_meter.cpp
