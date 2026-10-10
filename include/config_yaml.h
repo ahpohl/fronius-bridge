@@ -187,6 +187,18 @@ struct MqttTlsConfig {
 };
 
 // ---------------------------------------------------------------------------
+// MQTT discovery config
+//
+// Optional sub-block of the MQTT section; its presence turns on Home Assistant
+// MQTT device discovery, which openHAB's Home Assistant binding understands as
+// well. `prefix` is the discovery prefix both consumers subscribe to.
+// ---------------------------------------------------------------------------
+
+struct MqttDiscoveryConfig {
+  std::string prefix{"homeassistant"};
+};
+
+// ---------------------------------------------------------------------------
 // MQTT config
 // ---------------------------------------------------------------------------
 
@@ -199,6 +211,7 @@ struct MqttConfig {
   size_t queueSize{100};
   ReconnectDelayConfig reconnectDelay;
   std::optional<MqttTlsConfig> tls;
+  std::optional<MqttDiscoveryConfig> discovery;
 };
 
 // ---------------------------------------------------------------------------

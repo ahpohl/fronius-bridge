@@ -77,6 +77,8 @@ mqtt:
   #  ca_file: /etc/ssl/certs/mqtt-ca.crt
   #  cert_file: /etc/ssl/certs/mqtt-client.crt
   #  key_file: /etc/ssl/private/mqtt-client.key
+  #discovery:
+  #  prefix: homeassistant
 
 postgres:
   dsn: "host=localhost port=5432 dbname=fronius user=fronius_bridge password=your-secure-password"

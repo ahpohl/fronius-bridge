@@ -557,6 +557,33 @@ static std::optional<MqttTlsConfig> parseMqttTls(const YAML::Node &node) {
   return cfg;
 }
 
+// Optional: a missing section returns nullopt and nothing is announced. An
+// empty block (`discovery:` or `discovery: {}`) is valid and selects the
+// default prefix. The prefix becomes the first segments of a publish topic, so
+// wildcards and leading/trailing slashes are rejected rather than producing
+// topics no consumer subscribes to.
+static std::optional<MqttDiscoveryConfig>
+parseMqttDiscovery(const YAML::Node &node) {
+  if (!node)
+    return std::nullopt;
+
+  MqttDiscoveryConfig cfg;
+  const auto prefix = node.IsMap() ? node["prefix"] : YAML::Node();
+  if (prefix && !prefix.IsNull())
+    cfg.prefix = prefix.as<std::string>();
+
+  if (cfg.prefix.empty())
+    throw std::invalid_argument("mqtt.discovery.prefix must not be empty");
+  if (cfg.prefix.find_first_of("+#") != std::string::npos)
+    throw std::invalid_argument(
+        "mqtt.discovery.prefix must not contain the wildcards '+' or '#'");
+  if (cfg.prefix.front() == '/' || cfg.prefix.back() == '/')
+    throw std::invalid_argument(
+        "mqtt.discovery.prefix must not start or end with '/'");
+
+  return cfg;
+}
+
 static MqttConfig parseMqtt(const YAML::Node &node) {
   if (!node)
     throw std::runtime_error("Missing mqtt section in config");
@@ -574,6 +601,7 @@ static MqttConfig parseMqtt(const YAML::Node &node) {
 
   cfg.reconnectDelay = parseReconnectDelay(node["reconnect_delay"]);
   cfg.tls = parseMqttTls(node["tls"]);
+  cfg.discovery = parseMqttDiscovery(node["discovery"]);
 
   if (cfg.port <= 0 || cfg.port > 65535)
     throw std::invalid_argument("mqtt.port must be in range [1-65535]");
