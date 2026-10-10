@@ -159,9 +159,14 @@ int main(int argc, char *argv[]) {
 
     // --- Start MQTT client ---
     mqtt = std::make_unique<MqttClient>(cfg.mqtt, handler);
-    if (cfg.mqtt.discovery)
+    if (cfg.mqtt.discovery) {
       mainLogger->info("Home Assistant discovery enabled (prefix '{}')",
                        cfg.mqtt.discovery->prefix);
+      // Queued before any device config, so the parent the devices reference
+      // in via_device is announced first.
+      auto msg = HaDiscovery::bridge(*cfg.mqtt.discovery, cfg.mqtt.topic);
+      mqtt->publish(std::move(msg.payload), msg.topic);
+    }
 
     // --- Start optional PostgreSQL consumer ---
     // Constructed only when a postgres section is present; otherwise the

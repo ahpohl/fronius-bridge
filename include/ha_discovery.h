@@ -28,6 +28,12 @@ struct Message {
   std::string payload;
 };
 
+// The bridge itself, as the parent every inverter and meter names in
+// `via_device`, with a connectivity entity on the bridge availability topic.
+// Depends on nothing read from hardware, so it is published once at startup.
+Message bridge(const MqttDiscoveryConfig &discovery,
+               const std::string &baseTopic);
+
 Message inverter(const MqttDiscoveryConfig &discovery,
                  const std::string &baseTopic, const InverterConfig &cfg,
                  const InverterTypes::Device &device);

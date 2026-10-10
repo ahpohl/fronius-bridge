@@ -61,6 +61,14 @@ std::string nodeId(const std::string &baseTopic, const std::string &name) {
   return baseNodeId(baseTopic) + "_" + name;
 }
 
+json origin() {
+  return {
+      {"name", PROJECT_NAME},
+      {"sw_version", PROJECT_VERSION},
+      {"support_url", supportUrl},
+  };
+}
+
 // The device and origin blocks plus the shared options. Availability and
 // state_topic are inherited by every component that does not set its own, so
 // a component only names a topic when it reads something other than
@@ -83,14 +91,12 @@ json deviceRoot(const std::string &baseTopic, const std::string &topicBase,
   setIf("model", device.model);
   setIf("serial_number", device.serialNumber);
   setIf("sw_version", device.fwVersion);
+  // Groups the device under the bridge in Home Assistant ("Connected via").
+  dev["via_device"] = baseNodeId(baseTopic);
 
   json root;
   root["dev"] = std::move(dev);
-  root["o"] = {
-      {"name", PROJECT_NAME},
-      {"sw_version", PROJECT_VERSION},
-      {"support_url", supportUrl},
-  };
+  root["o"] = origin();
 
   // A reading is live only while both the bridge and the device are: the
   // bridge topic carries the broker-side will, the device topic the Modbus
@@ -156,6 +162,49 @@ std::string discoveryTopic(const MqttDiscoveryConfig &discovery,
 } // namespace
 
 namespace HaDiscovery {
+
+Message bridge(const MqttDiscoveryConfig &discovery,
+               const std::string &baseTopic) {
+  const std::string node = baseNodeId(baseTopic);
+
+  json root;
+  root["dev"] = {
+      {"identifiers", json::array({node})},
+      {"name", baseTopic},
+      {"model", PROJECT_NAME},
+      {"sw_version", PROJECT_VERSION},
+  };
+  root["o"] = origin();
+
+  // The bridge availability topic, which the broker-side will turns to
+  // `disconnected` on an unclean death, is both the device's availability and
+  // the entity's state. openHAB derives a Thing's status only from declared
+  // availability; without it the bridge Thing never leaves UNKNOWN. The price
+  // is that Home Assistant shows the entity "unavailable" rather than "off"
+  // once the bridge is gone.
+  root["availability"] = json::array({{
+      {"topic", baseTopic + "/availability"},
+      {"payload_available", payloadAvailable},
+      {"payload_not_available", payloadNotAvailable},
+  }});
+  root["cmps"] = {
+      {"connectivity",
+       {
+           {"p", "binary_sensor"},
+           {"name", "Connectivity"},
+           {"unique_id", node + "_connectivity"},
+           {"state_topic", baseTopic + "/availability"},
+           {"payload_on", payloadAvailable},
+           {"payload_off", payloadNotAvailable},
+           {"device_class", "connectivity"},
+           {"entity_category", "diagnostic"},
+       }},
+  };
+
+  // <prefix>/device/<base>/config: every device's object id extends <base>
+  // with "_<name>", so no device name can collide with the bridge's.
+  return {discovery.prefix + "/device/" + node + "/config", root.dump()};
+}
 
 Message inverter(const MqttDiscoveryConfig &discovery,
                  const std::string &baseTopic, const InverterConfig &cfg,
