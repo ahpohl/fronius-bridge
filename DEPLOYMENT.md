@@ -234,6 +234,30 @@ schema, privilege, or missing-extension error is fatal and shuts the bridge
 down with a non-zero exit so the operator notices; transient connection errors
 are retried.
 
+### Secrets in an environment file
+
+Rather than writing the database or broker password into the YAML, reference
+it as `${NAME}` (see the README's environment variable expansion) and keep the
+values in a root-only file such as `/etc/fronius-bridge/.env`, one `KEY=value`
+per line. An unset variable is a fatal startup error, so the file has to reach
+the bridge's environment. Exporting it in your shell is not enough when the
+bridge runs under `sudo`, which starts the program with a clean environment.
+
+A systemd unit loads the file with `EnvironmentFile=/etc/fronius-bridge/.env`.
+For a one-off foreground run, for example to try a new build before replacing
+the service binary, `systemd-run` reads the file with the same parser, so a
+file that works here works in the unit:
+
+```sh
+sudo systemd-run --pty --same-dir -p EnvironmentFile=/etc/fronius-bridge/.env \
+    "$PWD/fronius-bridge" --config /etc/fronius-bridge/config.yaml
+```
+
+`--pty` keeps the output on the terminal and Ctrl-C stops the bridge. The
+binary path must be absolute, since systemd does not search the current
+directory; for the packaged binary use `/usr/bin/fronius-bridge`. Stop the
+service first when the run uses the same serial line or slave port.
+
 ### Daily rollups with pg_cron
 
 Schedule two jobs, both calling `compute_site_rollup`: one finalizes the
