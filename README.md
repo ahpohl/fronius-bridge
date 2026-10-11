@@ -25,6 +25,7 @@ consumption, self-consumption, and grid import/export per day (see
 - Shared-bus support: any number of devices may share a single RS-485 dongle, with wire access serialised through a per-bus transaction queue
 - Manages night-time disconnections when the inverter enters standby and resumes publishing automatically
 - Publishes values, events, device info and connection availability as JSON to an MQTT broker
+- Optional Home Assistant MQTT discovery, also understood by openHAB, so devices and entities are created automatically (see [Home Assistant and openHAB discovery](#home-assistant-and-openhab-discovery))
 - Optional PostgreSQL/TimescaleDB persistence, with one schema per device, nightly per-day energy rollups, and a whole-site daily rollup (see [Site energy](#site-energy) and [DEPLOYMENT.md](DEPLOYMENT.md))
 - Fully configurable through a YAML configuration file
 - Extensive, module-scoped logging with device-name-aware levels
@@ -348,25 +349,16 @@ Note the will is not immediate. The broker declares a client dead after 1.5x the
 
 ### Home Assistant and openHAB discovery
 
-With an `mqtt.discovery` block, each device is announced on one retained config message using Home Assistant's [device-based MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#device-discovery-payload):
+With an `mqtt.discovery` block, the bridge announces itself and every device through Home Assistant's [device-based MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#device-discovery-payload), one retained config message each:
 
 ```
-<prefix>/device/<topic>_<name>/config     e.g. homeassistant/device/fronius-bridge_primo/config
+<prefix>/device/<topic>/config           the bridge, with a Connectivity entity
+<prefix>/device/<topic>_<name>/config    each inverter and meter, linked to the bridge
 ```
 
-Home Assistant (2024.12 or newer) and openHAB's [Home Assistant binding](https://www.openhab.org/addons/bindings/homeassistant/) (5.2 or newer) then create the device and its entities without any manual channel configuration. Every numeric field of the `values` payload becomes a sensor named after the field, with device class, unit and state class set, so energy counters can be picked directly in Home Assistant's Energy dashboard. Inverters additionally get their operating `state` from the `events` topic, plus the status code and event list as diagnostic entities. The bridge itself is announced as a parent device (`<prefix>/device/<topic>/config`, named after the base topic) with a *Connectivity* entity on `<topic>/availability`; every inverter and meter names it in `via_device`, so Home Assistant lists them as connected via the bridge. The state payloads themselves are unchanged: each entity reads its field from the existing topic through a template.
+Home Assistant (2024.12 or newer) and openHAB's [Home Assistant binding](https://www.openhab.org/addons/bindings/homeassistant/) (5.2 or newer) then create the devices and their entities without manual configuration. Every field of the `values` payload becomes a sensor with unit and device class, read from the existing topics, so the payloads themselves are unchanged and energy counters can be used directly in Home Assistant's Energy dashboard. Each entity follows the [availability](#availability) of both the bridge and its device.
 
-The entity set follows the device: the config is published from the device read, once the phase and MPPT counts are known, and again whenever a reconnected device reports a different identity. Fields a device never publishes are not announced (per-input energy on a hybrid inverter, total current on the EBZ meter, phase-to-phase voltage on a single-phase meter). Each entity lists both [availability](#availability) topics with `availability_mode: all`.
-
-A `/` in the base topic is folded to `_`. Ids are derived from the base topic and the device name (`fronius-bridge_primo_ac_energy`), not the serial number, so a replaced inverter keeps its entities and history, and two bridges on one broker with different base topics do not collide. Renaming a device therefore creates a new Home Assistant device.
-
-The bridge also subscribes to `<prefix>/status`. When `online` arrives there, from Home Assistant starting or from an openHAB inbox scan, it publishes every config again, so a device deleted in Home Assistant or removed from the openHAB inbox is found again without restarting the bridge.
-
-Removing the `discovery` block, or a device from the config, does not withdraw what was announced, since the config messages are retained. Clear one by publishing an empty retained payload to its topic:
-
-```sh
-mosquitto_pub -h <broker> -r -n -t homeassistant/device/fronius-bridge_primo/config
-```
+Ids are built from the base topic and the device name, not the serial number: replacing hardware keeps the entities and their history, while renaming a device creates a new one. When `online` is published on `<prefix>/status`, as Home Assistant does on startup and openHAB on an inbox scan, the bridge announces all devices again. The configs are retained, so a device removed from the bridge configuration stays announced until its topic is cleared on the broker.
 
 ### Example payloads
 
