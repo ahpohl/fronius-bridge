@@ -81,6 +81,13 @@ FroniusMeter::FroniusMeter(const MeterConfig &cfg, SignalHandler &signalHandler,
           // its own; the drop and retry callbacks above report that at warn
           // level, so this only records the underlying errno.
           logger_->debug("Modbus bus connection lost: {}", err.describe());
+        } else if (err.severity == ModbusError::Severity::TRANSIENT &&
+                   !bus_->isConnected()) {
+          // A failed open (e.g. ENOENT while the adapter is gone) used to be
+          // dropped here, leaving only the retry line with no cause. The
+          // isConnected() guard keeps read timeouts on a live bus out: the
+          // device error callback already records those.
+          logger_->debug("Modbus bus connect failed: {}", err.describe());
         } else if (err.severity == ModbusError::Severity::SHUTDOWN) {
           logger_->trace("Modbus bus operation cancelled due to shutdown: {}",
                          err.describe());
